@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { Suspense, useCallback, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Zap, Mail, Lock, AlertTriangle, MailCheck, RefreshCw } from "lucide-react";
@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 
-export default function LoginPage() {
+function LoginInner() {
   const router = useRouter();
   const params = useSearchParams();
   const { toast } = useToast();
@@ -196,5 +196,21 @@ export default function LoginPage() {
         </div>
       </main>
     </div>
+  );
+}
+
+// useSearchParams() requires a Suspense boundary during static prerender
+// (Vercel builds fail otherwise — see Next.js docs: missing-suspense-with-csr-bailout)
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center bg-[#060809]">
+          <RefreshCw className="h-5 w-5 animate-spin text-emerald-400" />
+        </div>
+      }
+    >
+      <LoginInner />
+    </Suspense>
   );
 }
