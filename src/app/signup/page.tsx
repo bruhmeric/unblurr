@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Zap, Mail, Lock, AlertTriangle, User, MailCheck, RefreshCw, ExternalLink } from "lucide-react";
+import { Zap, Mail, Lock, AlertTriangle, User, MailCheck, RefreshCw, ExternalLink, FolderSearch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -89,6 +89,10 @@ function SignupInner() {
                 <p className="mt-2 text-sm leading-relaxed text-zinc-400">
                   We sent a verification link to <span className="text-zinc-200">{email}</span>.
                   Click it to activate your account, then sign in.
+                </p>
+                <p className="mt-2.5 flex items-center justify-center gap-1.5 text-xs text-zinc-500">
+                  <FolderSearch className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                  <span>Don&apos;t see it? Check your <span className="text-zinc-400">spam</span> or junk folder.</span>
                 </p>
 
                 {devUrl && (
@@ -247,6 +251,10 @@ function SignupInner() {
               <Zap className="h-3 w-3 text-emerald-500" /> unblurr.site
             </Link>
             <span className="mx-1.5">·</span> Keep your video quality
+            <span className="mx-1.5">·</span>
+            <a href="mailto:unblurr@proton.me" className="inline-flex items-center gap-1 hover:text-zinc-400">
+              <Mail className="h-3 w-3 text-emerald-500" /> unblurr@proton.me
+            </a>
           </p>
         </div>
       </main>

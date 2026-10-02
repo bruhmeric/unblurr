@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Zap, Mail, Lock, AlertTriangle, MailCheck, RefreshCw } from "lucide-react";
+import { Zap, Mail, Lock, AlertTriangle, MailCheck, RefreshCw, FolderSearch } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -117,14 +117,23 @@ function LoginInner() {
                   <div className="min-w-0">
                     <span className="text-zinc-300">{error}</span>
                     {unverified && (
-                      <button
-                        onClick={resend}
-                        disabled={resending || !email}
-                        className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400 underline-offset-4 hover:underline disabled:opacity-50"
-                      >
-                        <RefreshCw className={`h-3 w-3 ${resending ? "animate-spin" : ""}`} />
-                        {resending ? "Sending…" : "Resend verification email"}
-                      </button>
+                      <>
+                        <button
+                          onClick={resend}
+                          disabled={resending || !email}
+                          className="mt-1.5 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-400 underline-offset-4 hover:underline disabled:opacity-50"
+                        >
+                          <RefreshCw className={`h-3 w-3 ${resending ? "animate-spin" : ""}`} />
+                          {resending ? "Sending…" : "Resend verification email"}
+                        </button>
+                        <p className="mt-1.5 flex items-start gap-1.5 text-xs text-zinc-500">
+                          <FolderSearch className="mt-0.5 h-3 w-3 shrink-0 text-zinc-500" />
+                          <span>
+                            Can&apos;t find the email? Check your <span className="text-zinc-400">spam</span> or
+                            junk folder — verification emails often land there.
+                          </span>
+                        </p>
+                      </>
                     )}
                   </div>
                 </div>
@@ -192,6 +201,10 @@ function LoginInner() {
             </Link>
             <span className="mx-1.5">·</span>
             Keep your video quality
+            <span className="mx-1.5">·</span>
+            <a href="mailto:unblurr@proton.me" className="inline-flex items-center gap-1 hover:text-zinc-400">
+              <Mail className="h-3 w-3 text-emerald-500" /> unblurr@proton.me
+            </a>
           </p>
         </div>
       </main>

@@ -1,9 +1,9 @@
 # unblurr.site
 
 Keep your video quality. unblurr.site prepares videos so they keep their
-original quality when uploaded — processed 100% on the user's device,
-with accounts, email verification, daily quotas, premium memberships and a
-full admin console.
+original quality when uploaded — with accounts, email verification, daily
+quotas, premium memberships and a full admin console. The processing module
+ships obfuscated; user videos are never uploaded.
 
 Built with Next.js 16 (App Router) + TypeScript + Tailwind CSS + shadcn/ui.
 
@@ -15,7 +15,7 @@ Built with Next.js 16 (App Router) + TypeScript + Tailwind CSS + shadcn/ui.
 - **Account system** — sign up with a **Gmail or iCloud** email address only
 - **Email verification** — verification link delivered by email (24h expiry)
 - **Video enhancer** — drag & drop `.mp4` / `.mov`, enhance, download.
-  The video is processed **entirely in the browser** and never uploaded
+  Your file never leaves your device
 - **Daily quota** — free accounts can enhance **2 videos per day**
   (resets 00:00 UTC)
 - **Premium** — unlimited processing, granted by the admin
@@ -39,7 +39,7 @@ Built with Next.js 16 (App Router) + TypeScript + Tailwind CSS + shadcn/ui.
 | Database | **MongoDB Atlas** (official driver, connection string) |
 | Auth | Custom JWT sessions (jose) in httpOnly cookies, bcrypt passwords |
 | Email | **Resend API** (verification emails) |
-| Processing | Client-side Web Worker engine (`public/engine/`) |
+| Processing | Proprietary processing module (shipped obfuscated) |
 
 ## Environment variables
 
@@ -123,7 +123,7 @@ git push -u origin main
 ## Project structure
 
 ```
-├── public/engine/            # client-side video enhancement engine (Web Worker)
+├── public/engine/            # processing engine (obfuscated — do not edit)
 ├── src/app/
 │   ├── page.tsx              # main tool page (auth-gated)
 │   ├── login/ signup/ verify/
@@ -142,6 +142,11 @@ git push -u origin main
 │   └── config.ts             # env + policy
 └── src/proxy.ts              # route protection (redirects)
 ```
+
+## Contact
+
+Questions, premium requests or account issues? Email
+**unblurr@proton.me**.
 
 ## Security notes
 

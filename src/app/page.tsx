@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   Zap, Upload, Film, Download, RefreshCw, ShieldCheck,
   CheckCircle2, AlertTriangle, ChevronRight, Lock, Sparkles,
-  FileVideo, Crown, LogOut, Gauge, LayoutDashboard, MailCheck,
+  FileVideo, Crown, LogOut, Gauge, LayoutDashboard, MailCheck, Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -184,7 +184,7 @@ export default function HomePage() {
       const inSize = file.size;
       setInBytes(inSize);
 
-      const worker = new Worker("/engine/v2-worker.js", { type: "module" });
+      const worker = new Worker("/engine/task.js", { type: "module" });
       workerRef.current?.terminate();
       workerRef.current = worker;
 
@@ -793,6 +793,14 @@ export default function HomePage() {
             <div className="flex items-center gap-4 text-xs text-zinc-600">
               <Link href="/login" className="hover:text-zinc-400">Sign in</Link>
               <Link href="/signup" className="hover:text-zinc-400">Create account</Link>
+              <a
+                href="mailto:unblurr@proton.me"
+                className="inline-flex items-center gap-1.5 hover:text-zinc-400"
+                title="Contact us"
+              >
+                <Mail className="h-3.5 w-3.5 text-emerald-500" />
+                unblurr@proton.me
+              </a>
             </div>
           </div>
         </div>
