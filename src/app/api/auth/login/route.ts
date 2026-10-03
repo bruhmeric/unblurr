@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { db, ensureDb } from "@/lib/db";
 import { SESSION_COOKIE } from "@/lib/config";
 import { createSessionToken, jsonError, sessionCookieOptions } from "@/lib/auth";
+import { verifyTurnstileToken } from "@/lib/turnstile";
 
 export const runtime = "nodejs";
 
@@ -13,6 +14,18 @@ export async function POST(req: NextRequest) {
     const email = String(body.email || "").toLowerCase().trim();
     const password = String(body.password || "");
     const expectAdmin = !!body.expectAdmin;
+
+    // Cloudflare Turnstile — verify the single-use token before touching
+    // credentials. Tokens are verified exactly once per submission.
+    const remoteIp =
+      req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
+    const turnstile = await verifyTurnstileToken(body.turnstileToken, remoteIp);
+    if (!turnstile.ok) {
+      return jsonError(
+        "Security check failed. Please complete the verification and try again.",
+        403
+      );
+    }
 
     const user = await db.findUserByEmail(email);
     if (!user || !bcrypt.compareSync(password, user.passwordHash)) {

@@ -9,6 +9,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
+import { Turnstile } from "@/components/turnstile";
 
 function LoginInner() {
   const router = useRouter();
@@ -21,12 +22,15 @@ function LoginInner() {
   const [unverified, setUnverified] = useState(false);
   const [loading, setLoading] = useState(false);
   const [resending, setResending] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileReset, setTurnstileReset] = useState(0);
 
   const justVerified = params.get("verified") === "1";
   const next = params.get("next") || "/";
 
   const submit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!turnstileToken) return;
     setError("");
     setUnverified(false);
     setLoading(true);
@@ -34,12 +38,14 @@ function LoginInner() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, turnstileToken }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data.error || "Sign-in failed. Please try again.");
         if (data.code === "unverified") setUnverified(true);
+        // Turnstile tokens are single-use — re-challenge for the next attempt
+        setTurnstileReset((n) => n + 1);
         return;
       }
       toast({ title: "Welcome back!", description: "Signed in successfully." });
@@ -47,10 +53,11 @@ function LoginInner() {
       router.refresh();
     } catch {
       setError("Network error. Please try again.");
+      setTurnstileReset((n) => n + 1);
     } finally {
       setLoading(false);
     }
-  }, [email, password, next, router, toast]);
+  }, [email, password, turnstileToken, next, router, toast]);
 
   const resend = useCallback(async () => {
     setResending(true);
@@ -172,9 +179,16 @@ function LoginInner() {
                     />
                   </div>
                 </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label>Security check</Label>
+                    <span className="text-[11px] text-zinc-600">Powered by Cloudflare</span>
+                  </div>
+                  <Turnstile onToken={setTurnstileToken} resetKey={turnstileReset} />
+                </div>
                 <Button
                   type="submit"
-                  disabled={loading}
+                  disabled={loading || !turnstileToken}
                   className="h-11 w-full text-[15px] font-semibold bg-gradient-to-r from-emerald-500 to-teal-500 text-[#060809] hover:from-emerald-400 hover:to-teal-400 shadow-lg shadow-emerald-500/25"
                 >
                   {loading ? (

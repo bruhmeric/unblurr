@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Turnstile } from "@/components/turnstile";
 
 export default function AdminLoginPage() {
   const router = useRouter();
@@ -15,30 +16,36 @@ export default function AdminLoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileReset, setTurnstileReset] = useState(0);
 
   const submit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!turnstileToken) return;
     setError("");
     setLoading(true);
     try {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password, expectAdmin: true }),
+        body: JSON.stringify({ email, password, expectAdmin: true, turnstileToken }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setError(data.error || "Admin sign-in failed.");
+        // Turnstile tokens are single-use — re-challenge for the next attempt
+        setTurnstileReset((n) => n + 1);
         return;
       }
       router.replace("/admin/dashboard");
       router.refresh();
     } catch {
       setError("Network error. Please try again.");
+      setTurnstileReset((n) => n + 1);
     } finally {
       setLoading(false);
     }
-  }, [email, password, router]);
+  }, [email, password, turnstileToken, router]);
 
   return (
     <div className="min-h-screen flex flex-col bg-[#060809] text-zinc-100 selection:bg-emerald-500/30">
@@ -111,9 +118,16 @@ export default function AdminLoginPage() {
                     />
                   </div>
                 </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label>Security check</Label>
+                    <span className="text-[11px] text-zinc-600">Powered by Cloudflare</span>
+                  </div>
+                  <Turnstile onToken={setTurnstileToken} resetKey={turnstileReset} />
+                </div>
                 <Button
                   type="submit"
-                  disabled={loading}
+                  disabled={loading || !turnstileToken}
                   className="h-11 w-full text-[15px] font-semibold bg-gradient-to-r from-emerald-500 to-teal-500 text-[#060809] hover:from-emerald-400 hover:to-teal-400 shadow-lg shadow-emerald-500/25"
                 >
                   {loading ? <RefreshCw className="mr-2 h-4 w-4 animate-spin" /> : <ShieldCheck className="mr-2 h-4 w-4" />}
