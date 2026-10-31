@@ -470,6 +470,328 @@
   }
 
   /* ============================================================
+   * TIFF (whole-file .tif/.tiff) — IFD walk for scan
+   * ============================================================ */
+
+  /* Tags that carry pixels or keep colors rendering identically.
+   * Everything else in a TIFF is metadata and is dropped by the
+   * lossless cleaner (deletefootprints.ai rule set: EXIF, IPTC, XMP,
+   * GPS, camera/device tags, timestamps, thumbnails — pixels stay
+   * byte-identical, the file only gets smaller). 34675 (ICC) is kept
+   * unless the user strips color profiles. */
+  const TIFF_KEEP = {
+    254: 1, 256: 1, 257: 1, 258: 1, 259: 1, 262: 1, 266: 1,
+    273: 1, 277: 1, 278: 1, 279: 1, 284: 1, 301: 1, 317: 1,
+    318: 1, 319: 1, 320: 1, 322: 1, 323: 1, 324: 1, 325: 1,
+    338: 1, 339: 1, 529: 1, 530: 1, 531: 1
+  };
+
+  function parseTiffFile(view) {
+    const res = { format: 'tiff', findings: [] };
+    try {
+      if (view.byteLength < 8) return res;
+      const bo = ascii(view, 0, 2);
+      if (bo !== 'II' && bo !== 'MM') return res;
+      const le = bo === 'II';
+      const rd16 = function (o) { return le ? view[o] | (view[o + 1] << 8) : (view[o] << 8) | view[o + 1]; };
+      const rd32 = function (o) { return le ? ((view[o] | (view[o + 1] << 8) | (view[o + 2] << 16) | (view[o + 3] << 24)) >>> 0) : (((view[o] << 24) | (view[o + 1] << 16) | (view[o + 2] << 8) | view[o + 3]) >>> 0); };
+      if (rd16(2) !== 42) return res;
+
+      /* EXIF fields via the shared IFD reader (walks Exif + GPS sub-IFDs) */
+      const tiff = parseTiff(view, 0);
+      if (tiff.fields.length) {
+        res.findings.push({
+          kind: 'exif', where: 'TIFF EXIF (IFD0 / Exif IFD)', label: 'EXIF metadata block',
+          detail: exifSummary(tiff.fields), evidence: 0, removable: true
+        });
+        for (const f of tiff.fields) {
+          if (f.label === 'Software' && f.value) {
+            for (const h of SIG.matchGenerators(f.value)) {
+              res.findings.push({ kind: 'generator', where: 'EXIF Software', label: h.label + ' in EXIF Software', detail: clip(f.value, 90), evidence: h.strength, removable: true });
+            }
+          }
+        }
+      }
+      if (tiff.gps) res.findings.push({ kind: 'gps', where: 'TIFF EXIF (GPS IFD)', label: 'GPS location data', detail: 'Latitude/longitude embedded', evidence: 0, removable: true });
+
+      /* container-level metadata tags (walk the IFD0 chain directly) */
+      const seen = new Set();
+      let off = rd32(4);
+      let guard = 0;
+      const typeSize = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8];
+      while (off && !seen.has(off) && guard++ < 64) {
+        seen.add(off);
+        if (off + 2 > view.byteLength) break;
+        const count = rd16(off);
+        if (count > 512 || off + 2 + count * 12 + 4 > view.byteLength) break;
+        for (let i = 0; i < count; i++) {
+          const eo = off + 2 + i * 12;
+          const tag = rd16(eo);
+          const type = rd16(eo + 2);
+          const num = rd32(eo + 4);
+          if (type === 0 || type > 12 || num > 0x100000) continue;
+          const bytes = typeSize[type] * num;
+          const vo = bytes <= 4 ? eo + 8 : rd32(eo + 8);
+          if (vo + Math.min(bytes, 70000) > view.byteLength) continue;
+          if (tag === 700) { /* XMP */
+            const text = utf8(view.subarray(vo, vo + Math.min(num, 70000)));
+            const x = parseXmp(text);
+            res.findings.push({ kind: 'xmp', where: 'TIFF XMP tag', label: 'XMP metadata packet', detail: x.creatorTool ? 'CreatorTool: ' + x.creatorTool : 'XMP packet in TIFF tag 700', evidence: 0, removable: true });
+            if (x.digitalSource) res.findings.push({ kind: 'xmp', where: 'XMP digitalSourceType', label: 'AI-source declaration', detail: x.digitalSource, evidence: /algorithmic|trained|composite|synthetic/i.test(x.digitalSource) ? 3 : 1, removable: true });
+            for (const h of SIG.matchGenerators(text)) res.findings.push({ kind: 'generator', where: 'TIFF XMP tag', label: h.label + ' in XMP', detail: 'Found "' + clip(h.match, 40) + '"', evidence: h.strength, removable: true });
+          } else if (tag === 33723 || tag === 34343) { /* IPTC */
+            res.findings.push({ kind: 'iptc', where: 'TIFF IPTC tag', label: 'IPTC metadata block', detail: 'IPTC records in TIFF tag ' + tag, evidence: 0, removable: true });
+            const text = utf8(view.subarray(vo, vo + Math.min(num, 2000)));
+            for (const h of SIG.matchGenerators(text)) res.findings.push({ kind: 'generator', where: 'TIFF IPTC tag', label: h.label + ' in IPTC', detail: 'Found "' + clip(h.match, 40) + '"', evidence: h.strength, removable: true });
+          } else if (tag === 34675) { /* ICC */
+            res.findings.push({ kind: 'icc', where: 'TIFF ICC profile tag', label: 'ICC color profile', detail: 'Embedded ICC profile (kept unless stripping color profiles)', evidence: 0, removable: true });
+          } else if (tag === 330) { /* SubIFDs — embedded thumbnails */
+            res.findings.push({ kind: 'other', where: 'TIFF SubIFD tag', label: 'Embedded thumbnail / sub-image', detail: 'Camera thumbnail data — dropped with the rest of the metadata', evidence: 0, removable: true });
+          }
+        }
+        off = rd32(off + 2 + count * 12);
+      }
+    } catch (e) { /* malformed — report what we have */ }
+    return res;
+  }
+
+  /* ============================================================
+   * ISO-BMFF (HEIC / HEIF / AVIF) — box walk + item metadata.
+   * Rich structural parse used by scan() (findings) and by the
+   * engine's lossless cleaner (rebuild planning).
+   * ============================================================ */
+
+  function rd16be(view, o) { return (view[o] << 8) | view[o + 1]; }
+  function rd32be(view, o) { return ((view[o] << 24) | (view[o + 1] << 16) | (view[o + 2] << 8) | view[o + 3]) >>> 0; }
+
+  function parseIsobmff(view) {
+    const res = { ok: false, brand: '', boxes: [], meta: null, items: [], primaryItemId: null, idat: null, iinfInfo: null, ilocInfo: null, ilocEntries: [], error: '' };
+    try {
+      const N = view.byteLength;
+      if (N < 16) throw new Error('TOO_SMALL');
+      let off = 0;
+      while (off + 8 <= N) {
+        let size = rd32be(view, off);
+        let headerSize = 8;
+        const type = ascii(view, off + 4, 4);
+        if (size === 1) {
+          if (off + 16 > N) throw new Error('BAD_LARGE_BOX');
+          size = rd32be(view, off + 8) * 4294967296 + rd32be(view, off + 12);
+          headerSize = 16;
+        } else if (size === 0) {
+          size = N - off;
+        }
+        if (size < headerSize || off + size > N) throw new Error('BAD_BOX_SIZE');
+        res.boxes.push({ type: type, start: off, size: size, headerSize: headerSize, contentStart: off + headerSize });
+        off += size;
+      }
+
+      const ftyp = res.boxes.filter(function (b) { return b.type === 'ftyp'; })[0];
+      if (!ftyp || ftyp.start !== 0) throw new Error('NO_FTYP');
+      res.brand = ascii(view, ftyp.contentStart, 4);
+
+      const meta = res.boxes.filter(function (b) { return b.type === 'meta'; })[0];
+      if (meta) {
+        const children = [];
+        let coff = meta.contentStart + 4; /* FullBox version + flags */
+        const cend = meta.start + meta.size;
+        while (coff + 8 <= cend) {
+          let csize = rd32be(view, coff);
+          let chs = 8;
+          const ctype = ascii(view, coff + 4, 4);
+          if (csize === 1) {
+            if (coff + 16 > cend) throw new Error('BAD_META_CHILD');
+            csize = rd32be(view, coff + 8) * 4294967296 + rd32be(view, coff + 12);
+            chs = 16;
+          } else if (csize === 0) {
+            csize = cend - coff;
+          }
+          if (csize < chs || coff + csize > cend) throw new Error('BAD_META_CHILD_SIZE');
+          children.push({ type: ctype, start: coff, size: csize, headerSize: chs, contentStart: coff + chs });
+          coff += csize;
+        }
+        res.meta = { start: meta.start, size: meta.size, headerSize: meta.headerSize, version: view[meta.contentStart], children: children };
+
+        /* iinf → item entries (infe) */
+        const iinf = children.filter(function (c) { return c.type === 'iinf'; })[0];
+        if (iinf) {
+          const iv = view[iinf.contentStart];
+          res.iinfInfo = { box: iinf, version: iv };
+          let p = iinf.contentStart + 4;
+          let count = iv === 1 ? rd32be(view, p) : rd16be(view, p);
+          p += iv === 1 ? 4 : 2;
+          for (let i = 0; i < count; i++) {
+            if (p + 8 > iinf.start + iinf.size) break;
+            const esize = rd32be(view, p);
+            if (esize < 8 || p + esize > iinf.start + iinf.size) break;
+            const etype = ascii(view, p + 4, 4);
+            if (etype === 'infe') {
+              const ev = view[p + 8];
+              const cs = p + 12; /* box header 8 + version/flags 4 */
+              let id = 0, itemType = '';
+              if (ev >= 2) {
+                id = ev === 3 ? rd32be(view, cs) : rd16be(view, cs);
+                itemType = ascii(view, cs + (ev === 3 ? 6 : 4), 4);
+              } else {
+                id = rd16be(view, cs);
+              }
+              res.items.push({ id: id, version: ev, type: itemType, infeStart: p, infeSize: esize });
+            }
+            p += esize;
+          }
+        }
+
+        const pitm = children.filter(function (c) { return c.type === 'pitm'; })[0];
+        if (pitm && pitm.size >= 10) {
+          const pv = view[pitm.contentStart];
+          res.primaryItemId = pv === 0 ? rd16be(view, pitm.contentStart + 4) : rd32be(view, pitm.contentStart + 4);
+        }
+
+        /* iloc → per-item extents */
+        const iloc = children.filter(function (c) { return c.type === 'iloc'; })[0];
+        if (iloc) {
+          const lv = view[iloc.contentStart];
+          let p = iloc.contentStart + 4;
+          const offsetSize = view[p] >> 4, lengthSize = view[p] & 15;
+          const baseOffsetSize = view[p + 1] >> 4, indexSize = view[p + 1] & 15;
+          res.ilocInfo = { box: iloc, version: lv, offsetSize: offsetSize, lengthSize: lengthSize, baseOffsetSize: baseOffsetSize, indexSize: indexSize };
+          p += 2;
+          let icount = lv < 2 ? rd16be(view, p) : rd32be(view, p);
+          p += lv < 2 ? 2 : 4;
+          for (let i = 0; i < icount; i++) {
+            if (p + 4 > iloc.start + iloc.size) break;
+            const entryStart = p;
+            const itemId = lv < 2 ? rd16be(view, p) : rd32be(view, p);
+            p += lv < 2 ? 2 : 4;
+            let construction = 0;
+            if (lv === 1 || lv === 2) { construction = rd16be(view, p) & 15; p += 2; }
+            p += 2; /* data_reference_index */
+            let baseOffset = 0;
+            for (let b = 0; b < baseOffsetSize; b++) baseOffset = baseOffset * 256 + view[p + b];
+            p += baseOffsetSize;
+            if (p + 2 > iloc.start + iloc.size) break;
+            const ecount = rd16be(view, p); p += 2;
+            const extents = [];
+            for (let e = 0; e < ecount; e++) {
+              if (indexSize > 0) p += indexSize;
+              let eoff = 0;
+              for (let b = 0; b < offsetSize; b++) eoff = eoff * 256 + view[p + b];
+              p += offsetSize;
+              let elen = 0;
+              for (let b = 0; b < lengthSize; b++) elen = elen * 256 + view[p + b];
+              p += lengthSize;
+              extents.push({ offset: eoff, length: elen });
+            }
+            const entry = { itemId: itemId, entryStart: entryStart, entrySize: p - entryStart, construction: construction, baseOffset: baseOffset, extents: extents };
+            res.ilocEntries.push(entry);
+            const it = res.items.filter(function (x) { return x.id === itemId; })[0];
+            if (it) it.iloc = entry;
+          }
+        }
+
+        res.idat = children.filter(function (c) { return c.type === 'idat'; })[0] || null;
+      }
+      res.ok = true;
+    } catch (e) {
+      res.ok = false;
+      res.error = (e && e.message) || String(e);
+    }
+    return res;
+  }
+
+  /* Read an item's payload bytes (concatenated extents). Construction
+   * 0 = absolute file offsets, 1 = relative to the idat box. */
+  function isobmffItemData(view, st, item) {
+    try {
+      if (!item || !item.iloc) return null;
+      const parts = [];
+      for (const ex of item.iloc.extents) {
+        if (ex.length === 0) continue;
+        let abs = item.iloc.baseOffset + ex.offset;
+        if (item.iloc.construction === 1) {
+          if (!st.idat) return null;
+          abs = st.idat.contentStart + item.iloc.baseOffset + ex.offset;
+        } else if (item.iloc.construction !== 0) {
+          return null;
+        }
+        if (abs < 0 || abs + ex.length > view.byteLength) return null;
+        parts.push(view.subarray(abs, abs + ex.length));
+      }
+      if (!parts.length) return null;
+      if (parts.length === 1) return parts[0];
+      let n = 0;
+      for (const p of parts) n += p.length;
+      const out = new Uint8Array(n);
+      let o = 0;
+      for (const p of parts) { out.set(p, o); o += p.length; }
+      return out;
+    } catch (e) { return null; }
+  }
+
+  /* scan() entry for HEIC/HEIF/AVIF — metadata findings from items */
+  function scanIsobmff(view) {
+    const res = { format: 'iso-bmff', findings: [] };
+    const st = parseIsobmff(view);
+    if (!st.ok) return res;
+    const isAvif = /^(avif|avis)/i.test(st.brand);
+    const fmtName = isAvif ? 'AVIF' : 'HEIC';
+    for (const it of st.items) {
+      if (it.type === 'Exif') {
+        const data = isobmffItemData(view, st, it);
+        let tiff = { fields: [], gps: false };
+        if (data && data.length > 12) {
+          /* Exif item payload: u32 tiff_header_offset, then the TIFF header.
+           * Real-world writers differ on whether the offset counts from the
+           * start of the item or from the end of the 4-byte field — accept
+           * the TIFF signature at either position. */
+          const isTiffAt = function (o) {
+            return o >= 0 && o + 4 <= data.length &&
+              ((data[o] === 0x49 && data[o + 1] === 0x49) || (data[o] === 0x4d && data[o + 1] === 0x4d));
+          };
+          const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+          let t0 = 0;
+          try { t0 = dv.getUint32(0, true); } catch (e) { t0 = 0; }
+          if (!isTiffAt(t0) && isTiffAt(4)) t0 = 4;
+          if (isTiffAt(t0) && t0 + 8 <= data.length) tiff = parseTiff(data, t0);
+        }
+        res.findings.push({
+          kind: 'exif', where: fmtName + ' Exif item', label: 'EXIF metadata block',
+          detail: tiff.fields.length ? exifSummary(tiff.fields) : 'EXIF stored as a metadata item',
+          evidence: 0, removable: true
+        });
+        if (tiff.gps) res.findings.push({ kind: 'gps', where: fmtName + ' Exif item (GPS IFD)', label: 'GPS location data', detail: 'Latitude/longitude embedded', evidence: 0, removable: true });
+        if (data) {
+          const text = utf8(data.subarray(0, Math.min(data.length, 70000)));
+          for (const h of SIG.matchGenerators(text)) res.findings.push({ kind: 'generator', where: fmtName + ' Exif item', label: h.label + ' in EXIF', detail: 'Found "' + clip(h.match, 40) + '"', evidence: h.strength, removable: true });
+        }
+      } else if (it.type === 'mime' || it.type === 'uri ') {
+        const data = isobmffItemData(view, st, it);
+        const text = data ? utf8(data.subarray(0, Math.min(data.length, 70000))) : '';
+        const x = parseXmp(text);
+        res.findings.push({
+          kind: 'xmp', where: fmtName + ' ' + (it.type === 'mime' ? 'XMP (mime) item' : 'uri item'), label: 'XMP metadata packet',
+          detail: x.creatorTool ? 'CreatorTool: ' + x.creatorTool : (data ? clip(text, 90) : 'Metadata stored as a "mime" item'),
+          evidence: 0, removable: true
+        });
+        if (x.digitalSource) res.findings.push({ kind: 'xmp', where: 'XMP digitalSourceType', label: 'AI-source declaration', detail: x.digitalSource, evidence: /algorithmic|trained|composite|synthetic/i.test(x.digitalSource) ? 3 : 1, removable: true });
+        for (const h of SIG.matchGenerators(text)) res.findings.push({ kind: 'generator', where: fmtName + ' XMP item', label: h.label + ' in XMP', detail: 'Found "' + clip(h.match, 40) + '"', evidence: h.strength, removable: true });
+      } else if (it.type === 'c2pa' || it.type === 'ciap' || it.type === 'uuid' || it.type === 'jumb' || it.type === 'jumd') {
+        const data = isobmffItemData(view, st, it);
+        const hasJumbf = data ? (containsBytes(data, 'JUMBF', 0, data.length) >= 0 || containsBytes(data, 'JUMD', 0, data.length) >= 0) : false;
+        const text = data ? utf8(data.subarray(0, Math.min(data.length, 4000))) : '';
+        const isC2pa = it.type === 'c2pa' || it.type === 'ciap' || hasJumbf || /urn:c2pa|claim_generator|contentcredentials|contentcredentials/i.test(text);
+        res.findings.push({
+          kind: isC2pa ? 'c2pa' : 'other', where: fmtName + ' "' + it.type + '" item',
+          label: isC2pa ? 'C2PA / Content Credentials' : 'Non-image metadata item',
+          detail: isC2pa ? 'Signed AI-content label data stored as an item' : 'Auxiliary item without pixel data',
+          evidence: isC2pa ? 3 : 0, removable: true
+        });
+      }
+    }
+    return res;
+  }
+
+  /* ============================================================
    * Raw whole-file signature scan (catch-all for C2PA etc.)
    * ============================================================ */
 
@@ -503,6 +825,8 @@
     else if (fmt === 'png') parsed = await parsePng(view);
     else if (fmt === 'webp') parsed = parseWebp(view);
     else if (fmt === 'gif') parsed = parseGif(view);
+    else if (fmt === 'tiff') parsed = parseTiffFile(view);
+    else if (fmt === 'iso-bmff') parsed = scanIsobmff(view);
     else parsed = { format: fmt, findings: [] };
 
     const raw = rawSignatureScan(view, sizeMB || 0);
@@ -520,8 +844,10 @@
     ascii: ascii, utf8: utf8, clip: clip, containsBytes: containsBytes,
     detectFormat: detectFormat, parseTiff: parseTiff, parseXmp: parseXmp,
     parseJpeg: parseJpeg, parsePng: parsePng, parseWebp: parseWebp, parseGif: parseGif,
+    parseTiffFile: parseTiffFile, parseIsobmff: parseIsobmff, scanIsobmff: scanIsobmff,
+    isobmffItemData: isobmffItemData, rd16be: rd16be, rd32be: rd32be,
     rawSignatureScan: rawSignatureScan, scan: scan,
-    PNG_KEEP: PNG_KEEP, WEBP_KEEP: WEBP_KEEP
+    PNG_KEEP: PNG_KEEP, WEBP_KEEP: WEBP_KEEP, TIFF_KEEP: TIFF_KEEP
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

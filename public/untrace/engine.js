@@ -198,6 +198,443 @@
   }
 
   /* ============================================================
+   * LOSSLESS TIFF CLEAN — the deletefootprints.ai method applied
+   * to the TIFF container: strip every metadata tag out of the
+   * IFDs (EXIF, GPS, IPTC, XMP, camera/device fields, timestamps,
+   * thumbnails) and rebuild the file with the pixel strips copied
+   * verbatim. Pixels stay byte-identical; the file only gets
+   * smaller. Throws on anything structurally unusual so the
+   * pipeline can fall back to Deep Clean instead of emitting a
+   * broken file.
+   * ============================================================ */
+
+  function cleanTiff(view, stripColor) {
+    const N = view.byteLength;
+    if (N < 8) throw new Error('TIFF_TOO_SMALL');
+    const bo = P.ascii(view, 0, 2);
+    if (bo !== 'II' && bo !== 'MM') throw new Error('NOT_TIFF');
+    const le = bo === 'II';
+    const rd16 = function (o) { return le ? view[o] | (view[o + 1] << 8) : (view[o] << 8) | view[o + 1]; };
+    const rd32 = function (o) { return le ? ((view[o] | (view[o + 1] << 8) | (view[o + 2] << 16) | (view[o + 3] << 24)) >>> 0) : (((view[o] << 24) | (view[o + 1] << 16) | (view[o + 2] << 8) | view[o + 3]) >>> 0); };
+    if (rd16(2) !== 42) throw new Error('NOT_TIFF');
+    const firstIfd = rd32(4);
+    if (firstIfd < 8 || firstIfd + 6 > N) throw new Error('TIFF_BAD_IFD0');
+    const TS = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8];
+
+    /* pass 1 — walk the IFD chain, keep only structural tags */
+    const ifds = [];
+    const seen = new Set();
+    let off = firstIfd;
+    while (off) {
+      if (seen.has(off) || off + 6 > N) throw new Error('TIFF_IFD_BROKEN');
+      seen.add(off);
+      const count = rd16(off);
+      if (count > 512 || off + 2 + count * 12 + 4 > N) throw new Error('TIFF_IFD_TRUNCATED');
+      const entries = [];
+      const seenTags = new Set();
+      let isDng = false;
+      for (let i = 0; i < count; i++) {
+        const eo = off + 2 + i * 12;
+        const tag = rd16(eo);
+        if (tag === 50706) isDng = true; /* DNGVersion — raw camera format, not a plain TIFF */
+        if (seenTags.has(tag)) continue; /* tolerate duplicate entries: keep the first */
+        const keep = P.TIFF_KEEP[tag] === 1 || (tag === 34675 && !stripColor);
+        if (!keep) continue;
+        seenTags.add(tag);
+        const type = rd16(eo + 2);
+        if (type === 0 || type > 12) continue;
+        const num = rd32(eo + 4);
+        if (TS[type] * num > N) throw new Error('TIFF_VALUE_HUGE');
+        entries.push({ tag: tag, eo: eo, type: type, num: num });
+      }
+      if (isDng) throw new Error('TIFF_DNG_UNSUPPORTED');
+      ifds.push({ entries: entries, next: rd32(off + 2 + count * 12) });
+      if (ifds.length > 64) throw new Error('TIFF_IFD_CHAIN');
+      off = ifds[ifds.length - 1].next;
+    }
+    if (!ifds.length) throw new Error('TIFF_NO_IFD');
+
+    /* identify pixel-data tags (strips or tiles) per IFD */
+    for (const ifd of ifds) {
+      const find = function (t) { return ifd.entries.filter(function (e) { return e.tag === t; })[0]; };
+      const so = find(273), sb = find(279), to = find(324), tb = find(325);
+      ifd.dataTags = [];
+      if (so && sb) ifd.dataTags.push({ offTag: 273, lenTag: 279, offEntry: so, lenEntry: sb });
+      if (to && tb) ifd.dataTags.push({ offTag: 324, lenTag: 325, offEntry: to, lenEntry: tb });
+    }
+
+    /* collect original strip/tile runs */
+    for (const ifd of ifds) {
+      for (const dt of ifd.dataTags) {
+        const offE = dt.offEntry, lenE = dt.lenEntry;
+        if (offE.num !== lenE.num || offE.num === 0 || offE.num > 0x10000) throw new Error('TIFF_STRIP_MISMATCH');
+        const offBytes = TS[offE.type] * offE.num;
+        const lenBytes = TS[lenE.type] * lenE.num;
+        const offBase = offBytes <= 4 ? offE.eo + 8 : rd32(offE.eo + 8);
+        const lenBase = lenBytes <= 4 ? lenE.eo + 8 : rd32(lenE.eo + 8);
+        if (offBase + offBytes > N || lenBase + lenBytes > N) throw new Error('TIFF_STRIP_PTR_OOB');
+        dt.runs = [];
+        for (let i = 0; i < offE.num; i++) {
+          const src = TS[offE.type] === 2 ? rd16(offBase + i * 2) : rd32(offBase + i * 4);
+          const len = TS[lenE.type] === 2 ? rd16(lenBase + i * 2) : rd32(lenBase + i * 4);
+          if (len > 0 && src + len > N) throw new Error('TIFF_STRIP_OOB');
+          dt.runs.push({ src: src, len: len });
+        }
+      }
+    }
+
+    /* pass 2 — layout: header, IFDs, value areas (even-aligned), pixel runs */
+    let pos = 8;
+    for (const ifd of ifds) {
+      ifd.ifdPos = pos;
+      pos += 2 + ifd.entries.length * 12 + 4;
+    }
+    for (const ifd of ifds) {
+      ifd.valPos = pos;
+      let v = 0;
+      for (const e of ifd.entries) {
+        const dt = ifd.dataTags.filter(function (d) { return d.offEntry === e; })[0];
+        if (dt) e.rewrite = dt;
+        const bytes = dt ? 4 * e.num : TS[e.type] * e.num; /* offsets rewritten as LONG */
+        e.valLen = bytes > 4 ? bytes : 0;
+        if (e.valLen) { e.valOff = v; v += (bytes & 1) ? bytes + 1 : bytes; }
+      }
+      ifd.valSize = v;
+      pos += v;
+    }
+    /* pixel run placement (word-aligned, gaps allowed) */
+    const allRuns = [];
+    let dataEnd = pos;
+    for (const ifd of ifds) {
+      for (const dt of ifd.dataTags) {
+        dt.dst = [];
+        for (const r of dt.runs) {
+          if (dataEnd & 1) dataEnd++;
+          const dst = dataEnd;
+          if (r.len) allRuns.push({ src: r.src, len: r.len, dst: dst });
+          dt.dst.push(dst);
+          dataEnd += r.len;
+        }
+      }
+    }
+
+    /* pass 3 — build */
+    const out = new Uint8Array(dataEnd);
+    const wr16 = function (o, v) { if (le) { out[o] = v & 255; out[o + 1] = (v >>> 8) & 255; } else { out[o] = (v >>> 8) & 255; out[o + 1] = v & 255; } };
+    const wr32 = function (o, v) { v = v >>> 0; if (le) { out[o] = v & 255; out[o + 1] = (v >>> 8) & 255; out[o + 2] = (v >>> 16) & 255; out[o + 3] = (v >>> 24) & 255; } else { out[o] = (v >>> 24) & 255; out[o + 1] = (v >>> 16) & 255; out[o + 2] = (v >>> 8) & 255; out[o + 3] = v & 255; } };
+    out[0] = view[0]; out[1] = view[1];
+    wr16(2, 42);
+    wr32(4, 8);
+    for (let k = 0; k < ifds.length; k++) {
+      const ifd = ifds[k];
+      wr16(ifd.ifdPos, ifd.entries.length);
+      let p = ifd.ifdPos + 2;
+      for (const e of ifd.entries) {
+        wr16(p, e.tag);
+        if (e.rewrite) { wr16(p + 2, 4); wr32(p + 4, e.num); }
+        else { wr16(p + 2, e.type); wr32(p + 4, e.num); }
+        if (e.valLen) wr32(p + 8, ifd.valPos + e.valOff);
+        else if (e.rewrite) wr32(p + 8, e.rewrite.dst[0]);
+        else { out[p + 8] = view[e.eo + 8]; out[p + 9] = view[e.eo + 9]; out[p + 10] = view[e.eo + 10]; out[p + 11] = view[e.eo + 11]; }
+        p += 12;
+      }
+      wr32(p, k + 1 < ifds.length ? ifds[k + 1].ifdPos : 0);
+    }
+    /* value areas + rewritten offset arrays */
+    for (const ifd of ifds) {
+      for (const e of ifd.entries) {
+        if (!e.valLen) continue;
+        if (e.rewrite) {
+          for (let i = 0; i < e.num; i++) wr32(ifd.valPos + e.valOff + i * 4, e.rewrite.dst[i]);
+        } else {
+          const origBytes = TS[e.type] * e.num;
+          const src = origBytes <= 4 ? e.eo + 8 : rd32(e.eo + 8);
+          if (src + origBytes > N) throw new Error('TIFF_VALUE_OOB');
+          out.set(view.subarray(src, src + origBytes), ifd.valPos + e.valOff);
+        }
+      }
+    }
+    /* pixel runs — copied verbatim */
+    for (const r of allRuns) out.set(view.subarray(r.src, r.src + r.len), r.dst);
+
+    /* pass 4 — verify: pixel bytes identical + IFD chain walks */
+    for (const r of allRuns) {
+      for (let i = 0; i < r.len; i++) if (out[r.dst + i] !== view[r.src + i]) throw new Error('TIFF_VERIFY_PIXELS');
+    }
+    (function () {
+      const rd16v = function (o) { return le ? out[o] | (out[o + 1] << 8) : (out[o] << 8) | out[o + 1]; };
+      const rd32v = function (o) { return le ? ((out[o] | (out[o + 1] << 8) | (out[o + 2] << 16) | (out[o + 3] << 24)) >>> 0) : (((out[o] << 24) | (out[o + 1] << 16) | (out[o + 2] << 8) | out[o + 3]) >>> 0); };
+      if (rd16v(2) !== 42) throw new Error('TIFF_VERIFY_HEADER');
+      let o = rd32v(4);
+      const seenV = new Set();
+      let guard = 0;
+      while (o) {
+        if (seenV.has(o) || o + 6 > out.length || guard++ > 64) throw new Error('TIFF_VERIFY_CHAIN');
+        seenV.add(o);
+        const cnt = rd16v(o);
+        if (o + 2 + cnt * 12 + 4 > out.length) throw new Error('TIFF_VERIFY_IFD');
+        o = rd32v(o + 2 + cnt * 12);
+      }
+    })();
+
+    return out;
+  }
+
+  /* ============================================================
+   * LOSSLESS ISO-BMFF CLEAN (HEIC / HEIF / AVIF) — the
+   * deletefootprints.ai method for ISO media containers: drop the
+   * metadata items (Exif, XMP "mime" items, C2PA/uuid items) from
+   * iinf + iloc, rebuild the meta box and mdat, and keep every
+   * pixel byte identical. Throws on anything unusual → Deep Clean
+   * fallback.
+   * ============================================================ */
+
+  const BMFF_META_TYPES = { 'Exif': 1, 'mime': 1, 'uri ': 1, 'uuid': 1, 'c2pa': 1, 'ciap': 1, 'jumb': 1, 'jumd': 1 };
+
+  function bmffMime(brand) {
+    if (/^(avif|avis)/i.test(brand)) return 'image/avif';
+    if (/^(heic|heix|hevc|heim|heis|heif|mif1|msf1)/i.test(brand)) return 'image/heic';
+    return 'application/octet-stream';
+  }
+
+  function cleanIsobmff(view) {
+    const st = P.parseIsobmff(view);
+    if (!st.ok) throw new Error(st.error || 'BMFF_PARSE');
+    if (!st.meta) throw new Error('BMFF_NO_META');
+    if (!st.iinfInfo || !st.ilocInfo) throw new Error('BMFF_NO_ITEMINFO');
+    if (st.ilocInfo.offsetSize === 0 || st.ilocInfo.lengthSize === 0) throw new Error('BMFF_ILOC_SIZES');
+    const type = bmffMime(st.brand);
+
+    const removed = st.items.filter(function (it) {
+      return it.id !== st.primaryItemId && BMFF_META_TYPES[it.type] === 1;
+    });
+    if (!removed.length) return { buffer: view.slice(0), type: type, changed: false };
+    const removedIds = {};
+    for (const it of removed) removedIds[it.id] = 1;
+
+    const mdats = st.boxes.filter(function (b) { return b.type === 'mdat'; });
+    if (!mdats.length) throw new Error('BMFF_NO_MDAT');
+
+    /* dangling iloc entries (item id not declared in iinf) — refuse */
+    for (const en of st.ilocEntries) {
+      const known = st.items.some(function (it) { return it.id === en.itemId; });
+      if (!known) throw new Error('BMFF_DANGLING_ILOC');
+    }
+
+    const kept = st.items.filter(function (it) { return !removedIds[it.id]; });
+    const keptEntries = st.ilocEntries.filter(function (en) { return !removedIds[en.itemId]; });
+
+    /* kept method-0 extents must live inside an mdat box */
+    for (const en of keptEntries) {
+      if (en.construction === 2) throw new Error('BMFF_CONSTRUCTION_2');
+      if (en.construction === 0) {
+        for (const ex of en.extents) {
+          const abs = en.baseOffset + ex.offset;
+          if (ex.length && !mdats.some(function (m) { return abs >= m.contentStart && abs + ex.length <= m.start + m.size; })) {
+            throw new Error('BMFF_EXTENT_OUTSIDE_MDAT');
+          }
+        }
+      }
+    }
+    /* removed items stored in idat: their bytes get zeroed in the idat copy */
+    const idatZero = [];
+    for (const it of removed) {
+      if (it.iloc && it.iloc.construction === 1 && st.idat) {
+        for (const ex of it.iloc.extents) {
+          const abs = st.idat.contentStart + it.iloc.baseOffset + ex.offset;
+          if (abs >= 0 && abs + ex.length <= st.idat.start + st.idat.size) idatZero.push([abs, ex.length]);
+        }
+      }
+    }
+
+    /* ---- plan the rebuilt meta children ---- */
+    const iinfV = st.iinfInfo.version;
+    const iinfBox = st.iinfInfo.box;
+    let keptInfeBytes = 0;
+    for (const it of kept) keptInfeBytes += it.infeSize;
+    const newIinfSize = 8 + 4 + (iinfV === 1 ? 4 : 2) + keptInfeBytes;
+
+    const ilocV = st.ilocInfo.version;
+    const ilocBox = st.ilocInfo.box;
+    const info = st.ilocInfo;
+    let keptEntryBytes = 0;
+    for (const en of keptEntries) keptEntryBytes += en.entrySize;
+    const newIlocSize = 8 + 4 + 2 + (ilocV < 2 ? 2 : 4) + keptEntryBytes;
+
+    /* iref: drop reference children that originate from removed items */
+    const irefBox = st.meta.children.filter(function (c) { return c.type === 'iref'; })[0];
+    let newIrefSize = null, keptIrefChildren = null, irefVersion = 0;
+    if (irefBox) {
+      irefVersion = view[irefBox.contentStart];
+      keptIrefChildren = [];
+      let coff = irefBox.contentStart + 4;
+      const cend = irefBox.start + irefBox.size;
+      while (coff + 8 <= cend) {
+        const csize = P.rd32be(view, coff);
+        if (csize < 8 || coff + csize > cend) throw new Error('BMFF_BAD_IREF_CHILD');
+        const fromId = irefVersion === 0 ? P.rd16be(view, coff + 8) : P.rd32be(view, coff + 8);
+        if (!removedIds[fromId]) keptIrefChildren.push(view.subarray(coff, coff + csize));
+        coff += csize;
+      }
+      newIrefSize = 8 + 4 + keptIrefChildren.reduce(function (a, b) { return a + b.length; }, 0);
+    }
+
+    /* new meta box size (children keep their original order) */
+    let newMetaSize = 8 + 4;
+    for (const c of st.meta.children) {
+      if (c.type === 'iinf') newMetaSize += newIinfSize;
+      else if (c.type === 'iloc') newMetaSize += newIlocSize;
+      else if (c.type === 'iref' && newIrefSize !== null) newMetaSize += newIrefSize;
+      else newMetaSize += c.size;
+    }
+
+    /* ---- plan the new top-level layout ---- */
+    /* kept method-0 extents are placed sequentially in the new mdat */
+    const placements = []; /* {en, extIdx, origAbs, len, newAbs} */
+    let mdatContentLen = 0;
+    for (const en of keptEntries) {
+      if (en.construction !== 0) continue;
+      for (let i = 0; i < en.extents.length; i++) {
+        const ex = en.extents[i];
+        placements.push({ en: en, extIdx: i, origAbs: en.baseOffset + ex.offset, len: ex.length, rel: mdatContentLen, newAbs: 0 });
+        mdatContentLen += ex.length;
+      }
+    }
+    const newMdatSize = 8 + mdatContentLen;
+
+    const newBoxes = [];
+    let sawMdat = false;
+    for (const b of st.boxes) {
+      if (b.type === 'meta') newBoxes.push({ kind: 'meta', size: newMetaSize });
+      else if (b.type === 'mdat') {
+        if (!sawMdat) { newBoxes.push({ kind: 'mdat', size: newMdatSize }); sawMdat = true; }
+        /* extra mdat boxes are folded into the rebuilt one */
+      } else newBoxes.push({ kind: 'copy', copy: view.subarray(b.start, b.start + b.size) });
+    }
+    let p = 0;
+    let mdatBox = null;
+    for (const nb of newBoxes) {
+      nb.pos = p;
+      if (nb.kind === 'copy') p += nb.copy.length;
+      else if (nb.kind === 'meta') p += nb.size;
+      else { nb.contentStart = p + 8; p += nb.size; mdatBox = nb; }
+    }
+    const total = p;
+    for (const pl of placements) pl.newAbs = mdatBox.contentStart + pl.rel;
+
+    /* ---- build ---- */
+    const out = new Uint8Array(total);
+    const wr32be = function (o, v) { v = v >>> 0; out[o] = (v >>> 24) & 255; out[o + 1] = (v >>> 16) & 255; out[o + 2] = (v >>> 8) & 255; out[o + 3] = v & 255; };
+    const wr16be = function (o, v) { out[o] = (v >>> 8) & 255; out[o + 1] = v & 255; };
+    const wrNbe = function (o, n, v) { v = v >>> 0; for (let i = n - 1; i >= 0; i--) { out[o + i] = v & 255; v = Math.floor(v / 256); } };
+    const putFourCC = function (o, s) { for (let i = 0; i < 4; i++) out[o + i] = s.charCodeAt(i); };
+
+    /* iinf without the removed items */
+    const buildIinf = function (cp) {
+      wr32be(cp, newIinfSize); putFourCC(cp + 4, 'iinf');
+      out.set(view.subarray(iinfBox.contentStart, iinfBox.contentStart + 4), cp + 8); /* version + flags */
+      if (iinfV === 1) wr32be(cp + 12, kept.length); else wr16be(cp + 12, kept.length);
+      let q = cp + 12 + (iinfV === 1 ? 4 : 2);
+      for (const it of kept) {
+        out.set(view.subarray(it.infeStart, it.infeStart + it.infeSize), q);
+        q += it.infeSize;
+      }
+    };
+
+    /* iloc without the removed entries, offsets repointed at the new mdat */
+    const buildIloc = function (cp) {
+      wr32be(cp, newIlocSize); putFourCC(cp + 4, 'iloc');
+      out.set(view.subarray(ilocBox.contentStart, ilocBox.contentStart + 6), cp + 8); /* version+flags + size pair */
+      let q = cp + 14; /* 8 header + 4 ver/flags + 2 size pair */
+      if (ilocV < 2) wr16be(q, keptEntries.length); else wr32be(q, keptEntries.length);
+      q += ilocV < 2 ? 2 : 4;
+      for (const en of keptEntries) {
+        out.set(view.subarray(en.entryStart, en.entryStart + en.entrySize), q);
+        if (en.construction === 0) {
+          let s = q;
+          s += info.version < 2 ? 2 : 4; /* item_id */
+          if (info.version === 1 || info.version === 2) s += 2; /* construction_method */
+          s += 2 + info.baseOffsetSize + 2; /* data_ref + base + extent_count */
+          for (let i = 0; i < en.extents.length; i++) {
+            s += info.indexSize;
+            let pl = null;
+            for (const cand of placements) { if (cand.en === en && cand.extIdx === i) { pl = cand; break; } }
+            const newOff = pl ? (pl.newAbs - en.baseOffset) : 0;
+            if (newOff < 0) throw new Error('BMFF_NEG_OFFSET');
+            wrNbe(s, info.offsetSize, newOff);
+            s += info.offsetSize + info.lengthSize;
+          }
+        }
+        q += en.entrySize;
+      }
+    };
+
+    /* iref without references that originated from removed items */
+    const buildIref = function (cp) {
+      wr32be(cp, newIrefSize); putFourCC(cp + 4, 'iref');
+      out.set(view.subarray(irefBox.contentStart, irefBox.contentStart + 4), cp + 8);
+      let q = cp + 12;
+      for (const ch of keptIrefChildren) { out.set(ch, q); q += ch.length; }
+    };
+
+    for (const nb of newBoxes) {
+      if (nb.kind === 'copy') {
+        out.set(nb.copy, nb.pos);
+      } else if (nb.kind === 'meta') {
+        wr32be(nb.pos, newMetaSize);
+        putFourCC(nb.pos + 4, 'meta');
+        out.set(view.subarray(st.meta.start + st.meta.headerSize, st.meta.start + st.meta.headerSize + 4), nb.pos + 8); /* version + flags */
+        let cp = nb.pos + 12;
+        for (const c of st.meta.children) {
+          if (c.type === 'iinf') { buildIinf(cp); cp += newIinfSize; }
+          else if (c.type === 'iloc') { buildIloc(cp); cp += newIlocSize; }
+          else if (c.type === 'iref' && keptIrefChildren) { buildIref(cp); cp += newIrefSize; }
+          else {
+            out.set(view.subarray(c.start, c.start + c.size), cp);
+            if (c.type === 'idat') {
+              for (const z of idatZero) {
+                const rel = z[0] - c.start;
+                if (rel >= 0 && rel + z[1] <= c.size) out.fill(0, cp + rel, cp + rel + z[1]);
+              }
+            }
+            cp += c.size;
+          }
+        }
+      } else {
+        wr32be(nb.pos, nb.size);
+        putFourCC(nb.pos + 4, 'mdat');
+        for (const pl of placements) {
+          if (pl.len) out.set(view.subarray(pl.origAbs, pl.origAbs + pl.len), pl.newAbs);
+        }
+      }
+    }
+
+    /* ---- verify: no metadata items left, pixel bytes identical ---- */
+    const st2 = P.parseIsobmff(out);
+    if (!st2.ok) throw new Error('BMFF_VERIFY_PARSE');
+    for (const it of st2.items) {
+      if (it.id !== st2.primaryItemId && BMFF_META_TYPES[it.type] === 1) throw new Error('BMFF_VERIFY_LEFTOVER');
+    }
+    /* every kept item's payload must still resolve and match the original bytes */
+    for (const it of kept) {
+      const before = P.isobmffItemData(view, st, it);
+      const it2 = st2.items.filter(function (x) { return x.id === it.id; })[0];
+      const after = it2 ? P.isobmffItemData(out, st2, it2) : null;
+      if (before && !after) throw new Error('BMFF_VERIFY_ITEM_LOST');
+      if (before && after) {
+        if (before.length !== after.length) throw new Error('BMFF_VERIFY_ITEM_LEN');
+        for (let i = 0; i < before.length; i++) if (before[i] !== after[i]) throw new Error('BMFF_VERIFY_ITEM_BYTES');
+      }
+    }
+    for (const pl of placements) {
+      if (!pl.len) continue;
+      for (let i = 0; i < pl.len; i++) if (out[pl.newAbs + i] !== view[pl.origAbs + i]) throw new Error('BMFF_VERIFY_PIXELS');
+    }
+
+    return { buffer: out, type: type, changed: true };
+  }
+
+  /* ============================================================
    * DECODE / ENCODE (browser paths, guarded for Node)
    * ============================================================ */
 
@@ -559,6 +996,9 @@
     if (type === 'image/webp') return '.webp';
     if (type === 'image/png') return '.png';
     if (type === 'image/jpeg') return '.jpg';
+    if (type === 'image/tiff') return '.tif';
+    if (type === 'image/avif') return '.avif';
+    if (type === 'image/heic') return '.heic';
     if (format === 'gif') return '.gif';
     return '.bin';
   }
@@ -620,7 +1060,7 @@
     else if (opts.mode === 'deep') mode = 'deep';
     else mode = aiTraces ? 'deep' : 'lossless'; // smart auto
 
-    const structuralOk = ['jpeg', 'png', 'webp', 'gif'].includes(format);
+    const structuralOk = ['jpeg', 'png', 'webp', 'gif', 'tiff', 'iso-bmff'].includes(format);
     if (!structuralOk && mode === 'lossless') {
       /* cannot do byte surgery → fall back to deep re-encode */
       mode = 'deep';
@@ -629,37 +1069,75 @@
     let outBuffer = null, outType = null;
     const notes = [];
 
+    /* Lossless header surgery (deletefootprints.ai method): strip the
+     * metadata containers out of the file structure and never touch a
+     * pixel. Throws when a container cannot be rebuilt safely. */
+    const attemptLossless = function () {
+      if (format === 'jpeg') return { buffer: cleanJpeg(view), type: 'image/jpeg' };
+      if (format === 'png') return { buffer: cleanPng(view, opts.stripColorProfile), type: 'image/png' };
+      if (format === 'webp') return { buffer: cleanWebp(view, opts.stripColorProfile), type: 'image/webp' };
+      if (format === 'gif') return { buffer: cleanGif(view), type: 'image/gif' };
+      if (format === 'tiff') return { buffer: cleanTiff(view, opts.stripColorProfile), type: 'image/tiff' };
+      if (format === 'iso-bmff') { const r = cleanIsobmff(view); return { buffer: r.buffer, type: r.type }; }
+      return null;
+    };
+
     if (mode === 'lossless') {
-      if (format === 'jpeg') outBuffer = cleanJpeg(view);
-      else if (format === 'png') outBuffer = cleanPng(view, opts.stripColorProfile);
-      else if (format === 'webp') outBuffer = cleanWebp(view, opts.stripColorProfile);
-      else if (format === 'gif') outBuffer = cleanGif(view);
-      outType = format === 'jpeg' ? 'image/jpeg' : format === 'png' ? 'image/png' : format === 'webp' ? 'image/webp' : 'image/gif';
-      if (findings.some(function (f) { return f.kind === 'exif'; })) {
-        notes.push('EXIF orientation tag removed with the rest of EXIF — use Deep Clean to bake rotation into pixels.');
+      try {
+        const r = attemptLossless();
+        if (r) { outBuffer = r.buffer; outType = r.type; }
+      } catch (e) {
+        outBuffer = null; outType = null;
+        notes.push('This file\u2019s structure could not be rebuilt losslessly (' + ((e && e.message) || 'error') + ') — it was re-encoded instead.');
       }
-      if (synth && synth.detected) {
-        notes.push('The invisible watermark lives inside the pixels — a metadata-only clean cannot touch it. Re-run with Deep Clean.');
-      }
-    } else {
-      if (onStage) { try { onStage('clean'); } catch (e) {} }
-      const r = await deepClean(view, {
-        stealth: opts.stealth || 'balanced',
-        format: opts.format || 'auto',
-        srcFormat: format,
-        name: name,
-        synthidDetected: !!(synth && synth.detected),
-      });
-      outBuffer = r.buffer; outType = r.type;
-      if (synth && synth.detected) {
-        notes.push('Deep Clean dissolved the invisible watermark — pixels were subtly reshuffled to break the pattern.');
+      if (outBuffer) {
+        if (findings.some(function (f) { return f.kind === 'exif'; })) {
+          notes.push('EXIF orientation tag removed with the rest of EXIF — use Deep Clean to bake rotation into pixels.');
+        }
+        if (synth && synth.detected) {
+          notes.push('The invisible watermark lives inside the pixels — a metadata-only clean cannot touch it. Re-run with Deep Clean.');
+        }
       } else {
-        notes.push('Re-encoded to disrupt any invisible AI watermarks hidden in the pixels.');
+        mode = 'deep';
       }
-      if (format === 'gif') notes.push('GIF re-encoded to a still image (canvas cannot write animation).');
-      if (opts.format && opts.format !== 'auto' && outType !== 'image/' + opts.format) {
-        /* encoder may have fallen back (e.g. webp unsupported) */
-        notes.push('Requested format unavailable in this browser — encoded as ' + outType + '.');
+    }
+
+    if (mode === 'deep') {
+      if (onStage) { try { onStage('clean'); } catch (e) {} }
+      let r = null;
+      try {
+        r = await deepClean(view, {
+          stealth: opts.stealth || 'balanced',
+          format: opts.format || 'auto',
+          srcFormat: format,
+          name: name,
+          synthidDetected: !!(synth && synth.detected),
+        });
+      } catch (e) {
+        /* Deep Clean has to decode the pixels. If this browser cannot
+         * decode the format at all (TIFF/HEIC outside Safari), fall back
+         * to the lossless header surgery instead of failing the file. */
+        if (structuralOk) {
+          try {
+            const r2 = attemptLossless();
+            if (r2) { outBuffer = r2.buffer; outType = r2.type; mode = 'lossless'; }
+          } catch (e2) { outBuffer = null; }
+        }
+        if (!outBuffer) throw e;
+        notes.push('This browser cannot decode this image for Deep Clean — the metadata was removed losslessly instead (pixels untouched). To dissolve an invisible watermark, re-run Deep Clean in a browser that can open this format.');
+      }
+      if (r) {
+        outBuffer = r.buffer; outType = r.type;
+        if (synth && synth.detected) {
+          notes.push('Deep Clean dissolved the invisible watermark — pixels were subtly reshuffled to break the pattern.');
+        } else {
+          notes.push('Re-encoded to disrupt any invisible AI watermarks hidden in the pixels.');
+        }
+        if (format === 'gif') notes.push('GIF re-encoded to a still image (canvas cannot write animation).');
+        if (opts.format && opts.format !== 'auto' && outType !== 'image/' + opts.format) {
+          /* encoder may have fallen back (e.g. webp unsupported) */
+          notes.push('Requested format unavailable in this browser — encoded as ' + outType + '.');
+        }
       }
     }
 
@@ -751,6 +1229,7 @@
   const api = {
     STEALTH: STEALTH,
     cleanJpeg: cleanJpeg, cleanPng: cleanPng, cleanWebp: cleanWebp, cleanGif: cleanGif,
+    cleanTiff: cleanTiff, cleanIsobmff: cleanIsobmff, bmffMime: bmffMime,
     deepClean: deepClean, statisticalDetectBmp: statisticalDetectBmp, scoreFile: scoreFile,
     processFile: processFile, makeThumb: makeThumb, randomName: randomName
   };
