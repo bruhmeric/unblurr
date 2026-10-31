@@ -31,7 +31,7 @@ const FAQS = [
   },
   {
     q: 'Which formats are supported?',
-    a: 'JPEG, PNG, WebP and GIF are fully supported (GIF keeps its animation). AVIF, HEIC, BMP and TIFF work wherever your browser can open them — Safari handles HEIC, most browsers handle AVIF. Anything unsupported fails with a clear message instead of pretending.',
+    a: 'JPEG, PNG, WebP, GIF, TIFF and HEIC/HEIF are fully supported for metadata cleaning (GIF keeps its animation), plus AVIF. Standard Clean strips metadata straight from the file structure in every one of them — no recompression, pixels stay byte-for-byte the same. Deep Clean (used against invisible watermarks) works wherever your browser can decode the image: Safari handles HEIC, most browsers handle AVIF and AVIF/TIFF varies. Anything unsupported fails with a clear message instead of pretending.',
   },
   {
     q: 'Is Untrace included in my unblurr plan?',
