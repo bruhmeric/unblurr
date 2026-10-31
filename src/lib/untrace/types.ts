@@ -29,18 +29,35 @@ export interface DetectMetrics {
   uniqueRatio: number;
 }
 
-/* Invisible watermark (SynthID-class) analysis — before/after. */
+/* Invisible watermark (SynthID) signal read — before/after.
+ * Method: direct signal reading — C2PA Content Credentials
+ * declarations, embedded metadata, tamper evidence. Deterministic:
+ * a signal is present and readable, or it is not (nothing is
+ * estimated, no percentages). */
+export interface SynthidSignal {
+  label: string;
+  where: string;
+}
+
+export interface SynthidChannels {
+  c2pa: { found: boolean; issuer: string | null; signed: boolean; aiSource: string[] };
+  synthid: { found: boolean; scope: string | null };
+  metadata: { found: boolean; markers: string[] };
+  tamper: { found: boolean; signs: string[] };
+}
+
 export interface SynthidInfo {
-  detected: boolean;
-  possible: boolean;
-  confidence: number;              /* 0..1 statistical confidence */
-  cvr: number;                     /* carrier-to-background signal ratio */
-  peak: number;                    /* median top carrier prominence */
-  bestSet: string;
-  topCarriers: { fy: number; fx: number; prom: number }[];
-  after: { confidence: number; cvr: number } | null;
-  reduced: number | null;          /* % signal reduction after Deep Clean */
-  removed: boolean | null;         /* verified no longer detectable */
+  detected: boolean;              /* SynthID declaration/signal read */
+  possible: boolean;              /* AI-generation signals without an explicit declaration */
+  confidence: number;             /* 1 = signal read, 0.5 = related signals, 0 = none (not an estimate) */
+  bestSet: string;                /* channel that produced the verdict */
+  signals: SynthidSignal[];       /* individual signals read from the file */
+  channels: SynthidChannels | null;
+  conclusion: string;             /* signals_found | nothing_found */
+  notChecked: string[];           /* blind spots (always includes synthid.google) */
+  after: { detected: boolean; possible: boolean; conclusion: string } | null;
+  reduced: number | null;         /* always null — signal reading is binary */
+  removed: boolean | null;        /* verified no longer present after Deep Clean */
 }
 
 export interface FileResult {
