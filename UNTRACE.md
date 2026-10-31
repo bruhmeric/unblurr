@@ -18,12 +18,14 @@ there is no backend at all.
 | **JPEG comments, PNG text chunks, WebP EXIF/XMP, GIF comments** | ✅ | ✅ |
 | **Trailing payloads** appended after JPEG EOI | ✅ | ✅ |
 | **Filename hints** (`DALL_E_1024.png`, `ComfyUI_00045.png`) | ✅ | ✅ (randomized names) |
-| **Invisible watermarks** (SynthID-class spread-spectrum) | ✅ carrier-pattern analysis (codebook-free, statistical) | ⚡ dissolved via Deep Clean + re-checked after cleaning |
+| **Invisible watermarks** (SynthID) | ✅ signal reading: C2PA watermark declarations, metadata markers, tamper evidence (synthiddetector.com method — deterministic, no estimation) | ⚡ dissolved via Deep Clean + re-checked after cleaning |
 
 Every cleaned file is **re-scanned before download** — the UI tells you if a
-single known signature survived. When an invisible watermark is found, the
-watermark check is **re-run on the cleaned output** and the dialog shows how
-much of the signal survived (e.g. “signal down 95% — no longer detectable”).
+single known signature survived. When a watermark declaration is found, the
+signal read is **re-run on the cleaned output**: a signal is present and
+readable, or it is not — there is nothing to estimate, no percentages. The
+Google pixel watermark itself needs Google's key and is listed as a blind
+spot (`synthid.google`), never guessed.
 
 ## Cleaning modes (as shown in the UI)
 
@@ -64,10 +66,17 @@ much of the signal survived (e.g. “signal down 95% — no longer detectable”
     patterns, C2PA markers, filename heuristics)
   - `parsers.js` — structure-aware parsers for JPEG segments, PNG chunks,
     WebP RIFF boxes, GIF blocks + EXIF (TIFF IFD) and XMP readers
-  - `synthid.js` — SynthID-class watermark detector + dissolver: pure-JS
-    radix-2 FFT, empirically-verified carrier tables (512-px dark/white sets,
-    1024-px universal bins), band-normalized carrier-vs-background scoring
-    with peakiness damping, elastic/affine warp, carrier notch
+  - `synthid.js` — SynthID watermark detector (signal reading, per the
+    synthiddetector.com method) + dissolver: reads C2PA Content
+    Credentials manifest stores (JPEG APP11 "JP" / PNG caBX / WebP
+    chunks / raw fallback), issuer & signer certificates, IPTC
+    digitalSourceType declarations, explicit SynthID declarations
+    (Google signs its generated images with a credential that declares
+    an embedded SynthID watermark; OpenAI carries the same dual signal
+    since May 2026), metadata markers, and tamper evidence — four
+    deterministic channels, no statistical estimation. Removal side:
+    elastic/affine warp, carrier notch (pure-JS radix-2 FFT,
+    empirically-verified carrier tables)
   - `engine.js` — lossless cleaners, SynthID-aware deep clean, statistical AI
     detector, scoring, before/after watermark verification
   - `worker.js` — worker entry point
@@ -123,33 +132,37 @@ pixel identity, and the SynthID pipeline on synthetic images:
 ```bash
 python3 scripts/make_test_images.py     # metadata fixture images
 npm run test:engine                     # 35 assertions (scan/clean/verify)
-node scripts/test-synthid.mjs           # 23 assertions (FFT, detect, dissolve, notch)
+node scripts/test-synthid.mjs           # 54 assertions (detect, dissolve, notch)
 ```
 
 Covers: Midjourney-in-EXIF JPEG (+ GPS + trailing payload), Firefly XMP with
 `trainedAlgorithmicMedia`, SD/ComfyUI PNG text chunks, C2PA/JUMBF PNG,
 DALL·E eXIf, Grok WebP EXIF, SD GIF comments, clean-file zero-finding
 behavior, lossless pixel identity (PNG + JPEG), filename heuristics; plus
-FFT-vs-DFT correctness, Hermitian symmetry, synthetic-watermark detection
-(dark/white carrier sets, flat + buried-in-photo), false-positive controls
-(natural-style photos, off-carrier periodic textures), warp PSNR floors,
-and carrier-notch energy damping.
+C2PA declaration parsing (JPEG APP11 single & multi-segment, PNG caBX,
+WebP), SynthID declarations for Google / OpenAI / explicit mentions,
+metadata-channel markers, tamper evidence, after-clean verification,
+FFT-vs-DFT correctness, Hermitian symmetry, warp PSNR floors, and
+carrier-notch energy damping.
 
 ## Honesty & limitations
 
 - Statistical detection is a **heuristic** — it flags likely-AI signals
   (noise uniformity, high-frequency falloff, saturation) but never claims
   proof. Metadata evidence is what drives high-confidence verdicts.
-- The invisible-watermark check is a **codebook-free statistical estimate**
-  built from publicly reverse-engineered carrier frequencies. It does not use
-  Google's proprietary decoder and is not an official SynthID verdict. It is
-  strongest on flat/simple images and can miss faint marks buried in busy
-  photo content.
+- The invisible-watermark check is a **direct signal read** (the
+  synthiddetector.com method): C2PA Content Credentials declarations,
+  metadata markers, and tamper evidence, read deterministically off the
+  file bytes. It does not estimate likelihoods and publishes its blind
+  spots instead: the Google pixel watermark itself (`synthid.google`)
+  can only be verified by the key holder, and a stripped declaration
+  says nothing about whether the pixel watermark survived — which is
+  why Deep Clean dissolves the pixels too, and the check re-runs after
+  cleaning.
 - Invisible watermark **dissolution** measurably degrades the carrier signal
-  (typically 90%+ signal reduction at Balanced on detectable marks) but
-  cannot *guarantee* removal of every watermark. That's why the watermark
-  check re-runs after cleaning and reports exactly how much signal survived
-  — you always know where you stand.
+  in the pixels, but cannot *guarantee* removal of every watermark. That's
+  why the watermark check re-runs after cleaning — you always know where
+  you stand.
 - Platforms may still classify images **visually** — metadata cleaning does
   not change what pixels look like to a classifier.
 - GIFs keep their animation in Standard Clean; Deep Clean converts them to
