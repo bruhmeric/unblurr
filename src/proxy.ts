@@ -27,6 +27,12 @@ export async function proxy(req: NextRequest) {
     return redirect("/login?next=/");
   }
 
+  // Untrace (AI image cleaner) requires a session — free & unlimited for
+  // logged-in users; processing is 100% client-side so no quota applies.
+  if (pathname === "/untrace" && !session) {
+    return redirect("/login?next=/untrace");
+  }
+
   // Auth pages: if already signed in, go home
   if ((pathname === "/login" || pathname === "/signup") && session) {
     return redirect("/");
@@ -49,5 +55,5 @@ export async function proxy(req: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/", "/login", "/signup", "/admin", "/admin/:path*"],
+  matcher: ["/", "/untrace", "/login", "/signup", "/admin", "/admin/:path*"],
 };
