@@ -120,3 +120,180 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ============================================================================
+ * Untrace — AI image footprint cleaner (added feature)
+ *
+ * Everything below is NEW and scoped exclusively to the /untrace feature.
+ * The palette is applied through CSS custom properties on `.untrace-scope`
+ * (the page wrapper) and `body.untrace-theme` (set from JS only while the
+ * Untrace page is mounted, so portal content — dialogs, selects, toasts —
+ * inherits it too). No rule above this line is modified, so every other
+ * unblurr page renders exactly as before.
+ *
+ * Untrace dark cyber-clean palette (dark-only feature page)
+ * ========================================================================== */
+
+.untrace-scope,
+body.untrace-theme {
+  --radius: 0.75rem;
+  --background: #04070c;
+  --foreground: #e9eef3;
+  --card: #0a1017;
+  --card-foreground: #e9eef3;
+  --popover: #0b1119;
+  --popover-foreground: #e9eef3;
+  --primary: #2dd4ae;
+  --primary-foreground: #03120d;
+  --secondary: #101823;
+  --secondary-foreground: #cfd9e2;
+  --muted: #0c141d;
+  --muted-foreground: #8b98a6;
+  --accent: #0f1a24;
+  --accent-foreground: #d9e3ec;
+  --destructive: #f8717155;
+  --border: rgba(151, 168, 186, 0.14);
+  --input: rgba(151, 168, 186, 0.2);
+  --ring: #2dd4ae;
+  --chart-1: #22d3ee;
+  --chart-2: #34d399;
+  --chart-3: #f59e0b;
+  --chart-4: #fb7185;
+  --chart-5: #a78bfa;
+  --sidebar: #0a1017;
+  --sidebar-foreground: #e9eef3;
+  --sidebar-primary: #2dd4ae;
+  --sidebar-primary-foreground: #03120d;
+  --sidebar-accent: #0f1a24;
+  --sidebar-accent-foreground: #d9e3ec;
+  --sidebar-border: rgba(151, 168, 186, 0.14);
+  --sidebar-ring: #2dd4ae;
+}
+
+/* ---------- display helpers ---------- */
+.untrace-scope .font-display,
+body.untrace-theme .font-display {
+  font-family: var(--font-space-grotesk), var(--font-geist-sans), sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.untrace-scope .text-gradient,
+body.untrace-theme .text-gradient {
+  background: linear-gradient(92deg, #67e8f9 0%, #2dd4ae 55%, #34d399 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.untrace-scope .glass,
+body.untrace-theme .glass {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.untrace-scope .glass-strong,
+body.untrace-theme .glass-strong {
+  background: rgba(10, 16, 23, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(18px);
+}
+
+/* ---------- background scenery ---------- */
+.untrace-scope .bg-grid,
+body.untrace-theme .bg-grid {
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.055) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.untrace-scope .mask-fade-y,
+body.untrace-theme .mask-fade-y {
+  -webkit-mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 35%, transparent 78%);
+  mask-image: radial-gradient(ellipse 90% 70% at 50% 0%, black 35%, transparent 78%);
+}
+
+.untrace-scope .glow-orb,
+body.untrace-theme .glow-orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* ---------- animations ---------- */
+@keyframes untrace-float-slow {
+  0%, 100% { transform: translateY(0) translateX(0); }
+  50% { transform: translateY(-24px) translateX(12px); }
+}
+.untrace-scope .animate-float-slow,
+body.untrace-theme .animate-float-slow { animation: untrace-float-slow 11s ease-in-out infinite; }
+
+@keyframes untrace-scan-line {
+  0% { transform: translateY(-100%); opacity: 0; }
+  12% { opacity: 1; }
+  88% { opacity: 1; }
+  100% { transform: translateY(2200%); opacity: 0; }
+}
+.untrace-scope .animate-scan-line,
+body.untrace-theme .animate-scan-line { animation: untrace-scan-line 3.4s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+
+@keyframes untrace-pulse-ring {
+  0% { box-shadow: 0 0 0 0 rgba(45, 212, 174, 0.35); }
+  70% { box-shadow: 0 0 0 16px rgba(45, 212, 174, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(45, 212, 174, 0); }
+}
+.untrace-scope .animate-pulse-ring,
+body.untrace-theme .animate-pulse-ring { animation: untrace-pulse-ring 2.2s ease-out infinite; }
+
+@keyframes untrace-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.untrace-scope .animate-shimmer,
+body.untrace-theme .animate-shimmer {
+  background: linear-gradient(90deg, transparent, rgba(45, 212, 174, 0.18), transparent);
+  background-size: 200% 100%;
+  animation: untrace-shimmer 1.8s linear infinite;
+}
+
+/* ---------- scrollbars ---------- */
+.untrace-scope .nice-scroll::-webkit-scrollbar,
+body.untrace-theme .nice-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.untrace-scope .nice-scroll::-webkit-scrollbar-track,
+body.untrace-theme .nice-scroll::-webkit-scrollbar-track { background: transparent; }
+.untrace-scope .nice-scroll::-webkit-scrollbar-thumb,
+body.untrace-theme .nice-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.22);
+  border-radius: 8px;
+}
+.untrace-scope .nice-scroll::-webkit-scrollbar-thumb:hover,
+body.untrace-theme .nice-scroll::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.4); }
+
+/* more visible scrollbar for the details dialog */
+.untrace-scope .dialog-scroll,
+body.untrace-theme .dialog-scroll { scrollbar-width: thin; scrollbar-color: rgba(148, 163, 184, 0.5) transparent; }
+.untrace-scope .dialog-scroll::-webkit-scrollbar,
+body.untrace-theme .dialog-scroll::-webkit-scrollbar { width: 10px; }
+.untrace-scope .dialog-scroll::-webkit-scrollbar-track,
+body.untrace-theme .dialog-scroll::-webkit-scrollbar-track { background: transparent; }
+.untrace-scope .dialog-scroll::-webkit-scrollbar-thumb,
+body.untrace-theme .dialog-scroll::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 8px;
+  border: 2px solid #0a1017;
+}
+.untrace-scope .dialog-scroll::-webkit-scrollbar-thumb:hover,
+body.untrace-theme .dialog-scroll::-webkit-scrollbar-thumb:hover { background: rgba(148, 163, 184, 0.7); }
+
+/* ---------- misc ---------- */
+.untrace-scope .content-auto,
+body.untrace-theme .content-auto { content-visibility: auto; contain-intrinsic-size: auto 64px; }
+
+.untrace-scope .no-scrollbar::-webkit-scrollbar,
+body.untrace-theme .no-scrollbar::-webkit-scrollbar { display: none; }
+.untrace-scope .no-scrollbar,
+body.untrace-theme .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+

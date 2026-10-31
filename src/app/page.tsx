@@ -6,7 +6,7 @@ import Link from "next/link";
 import {
   Zap, Upload, Film, Download, RefreshCw, ShieldCheck,
   CheckCircle2, AlertTriangle, ChevronRight, Lock, Sparkles,
-  FileVideo, Crown, LogOut, Gauge, LayoutDashboard, MailCheck, Mail,
+  FileVideo, Crown, LogOut, Gauge, LayoutDashboard, MailCheck, Mail, Fingerprint,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -319,6 +319,20 @@ export default function HomePage() {
           </Link>
           {authChecked && user && (
             <div className="flex items-center gap-2 sm:gap-3">
+              <Button
+                asChild
+                variant="outline"
+                size="sm"
+                className="h-9 border-white/10 bg-white/5 text-zinc-200 hover:bg-white/10 hover:text-white"
+              >
+                <Link
+                  href="/untrace"
+                  title="AI image footprint cleaner — free & unlimited for members"
+                >
+                  <Fingerprint className="mr-1.5 h-4 w-4" />
+                  Untrace
+                </Link>
+              </Button>
               <Badge
                 variant="outline"
                 className={`hidden sm:inline-flex border-emerald-500/30 bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/10 ${
