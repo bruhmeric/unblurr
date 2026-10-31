@@ -19,6 +19,12 @@ Built with Next.js 16 (App Router) + TypeScript + Tailwind CSS + shadcn/ui.
 - **Daily quota** — free accounts can enhance **2 videos per day**
   (resets 00:00 UTC)
 - **Premium** — unlimited processing, granted by the admin
+- **Untrace — AI image footprint cleaner** — free & unlimited for every
+  signed-in member. Detects and erases C2PA Content Credentials, EXIF,
+  GPS, XMP/IPTC, generation prompts, AI-generator signatures, filename
+  hints and SynthID-class invisible watermarks. Bulk batches up to 500
+  images, one-click ZIP download, 100% in-browser — nothing ever uploads,
+  and it never counts against your video quota
 
 ### For the admin
 - **Admin console at `/admin`** (dedicated admin sign-in)
@@ -99,6 +105,7 @@ git push -u origin main
    `JWT_SECRET`, `NEXT_PUBLIC_SITE_URL`
 4. Deploy. Your routes:
    - `/` — video enhancer (login required)
+   - `/untrace` — AI image footprint cleaner (login required, free & unlimited)
    - `/login`, `/signup`, `/verify`
    - `/admin` — admin sign-in
    - `/admin/dashboard` — admin console
@@ -124,24 +131,62 @@ git push -u origin main
 
 ```
 ├── public/engine/            # processing engine (obfuscated — do not edit)
+├── public/untrace/           # Untrace cleaning engine (client-side workers)
 ├── src/app/
 │   ├── page.tsx              # main tool page (auth-gated)
+│   ├── untrace/              # Untrace — AI image cleaner (auth-gated)
 │   ├── login/ signup/ verify/
 │   ├── admin/                # admin login
 │   └── admin/dashboard/      # admin console
 ├── src/app/api/
 │   ├── auth/                 # signup, login, logout, me, verify, resend
-│   ├── quota/                # quota status + consume
+│   ├── quota/                # quota status + consume (video enhancer only)
 │   └── admin/                # stats, users, logs
-├── src/components/admin/     # dashboard tabs
+├── src/components/
+│   ├── admin/                # dashboard tabs
+│   ├── tool/                 # Untrace cleaner UI (dropzone, queue, settings)
+│   └── untrace/              # Untrace page shell + landing sections
 ├── src/lib/
 │   ├── mongo.ts              # MongoDB Atlas adapter
 │   ├── filedb.ts             # local demo fallback adapter
 │   ├── auth.ts               # JWT sessions + guards
 │   ├── email.ts              # Resend delivery
+│   ├── untrace/              # Untrace worker-pool client + queue store
 │   └── config.ts             # env + policy
 └── src/proxy.ts              # route protection (redirects)
 ```
+
+## Untrace — AI image footprint cleaner
+
+**Route:** `/untrace` — sign-in required. Free and unlimited for **all**
+logged-in users (free, premium and admin); it does **not** use the daily
+video quota because the cleaning engine runs entirely in the visitor's
+browser via Web Workers. There is no new API route, no database usage and
+no new environment variable.
+
+What it detects & removes: C2PA / Content Credentials, generation prompts
+(Stable Diffusion / ComfyUI parameters & workflow chunks), generator
+signatures of 40+ AI tools (Midjourney, DALL·E / GPT Image, Firefly,
+Imagen / SynthID / Gemini, FLUX, Grok, Ideogram, …), EXIF camera data,
+GPS coordinates, XMP / IPTC, JPEG comments, PNG text chunks, WebP
+EXIF/XMP, GIF comments, trailing payloads, filename hints, ICC profiles,
+timestamps, and SynthID-class invisible watermarks (Deep Clean mode —
+verified by a re-scan after cleaning).
+
+See [`UNTRACE.md`](./UNTRACE.md) for the full engine documentation,
+cleaning modes, test suite and honesty/limitations notes. The engine code
+is MIT-licensed ([`UNTRACE-LICENSE`](./UNTRACE-LICENSE)).
+
+Dev-only test harnesses live in `scripts/`:
+
+```bash
+python3 scripts/make_test_images.py   # generate metadata fixture images
+node scripts/test-engine.mjs          # scan/clean/verify assertions
+node scripts/test-synthid.mjs         # FFT / detect / dissolve assertions
+```
+
+> Note: these harnesses are development tools — they are not part of the
+> Vercel build and never run in production.
 
 ## Contact
 
