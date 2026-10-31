@@ -48,16 +48,16 @@ function ScoreGauge({ score, verdict }: { score: number; verdict: FileResult['ve
 /* --- Invisible watermark (SynthID-class) check panel --- */
 
 function wmStatus(s: SynthidInfo) {
-  if (s.detected) return { label: 'Watermark found', tone: 'border-fuchsia-400/40 bg-fuchsia-400/10 text-fuchsia-300', bar: 'bg-fuchsia-400' };
-  if (s.possible) return { label: 'Faint signal', tone: 'border-amber-400/40 bg-amber-400/10 text-amber-300', bar: 'bg-amber-400' };
-  return { label: 'None found', tone: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300', bar: 'bg-emerald-400' };
+  if (s.detected) return { label: 'Watermark declared', tone: 'border-fuchsia-400/40 bg-fuchsia-400/10 text-fuchsia-300' };
+  if (s.possible) return { label: 'AI signals found', tone: 'border-amber-400/40 bg-amber-400/10 text-amber-300' };
+  return { label: 'None found', tone: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300' };
 }
 
 function WatermarkCheck({ r }: { r: FileResult }) {
   const s = r.synthid;
   if (!s) return null;
   const st = wmStatus(s);
-  const pct = Math.round(s.confidence * 100);
+  const signals = s.signals ?? [];
 
   return (
     <section
@@ -77,22 +77,31 @@ function WatermarkCheck({ r }: { r: FileResult }) {
         <div>
           <p className="text-xs leading-relaxed text-slate-400">
             {s.detected
-              ? 'Found a hidden pattern woven into the pixels — the signature of invisible AI watermarks like Google\u2019s SynthID.'
+              ? 'A readable signal in this file declares an invisible SynthID watermark — the signed declaration generators like Google attach to their images.'
               : s.possible
-                ? 'Detected a faint hidden pattern in the pixels. It may be an invisible watermark — or ordinary image texture.'
-                : 'No hidden watermark pattern found in the pixels.'}
+                ? 'AI-generation signals found in the file\u2019s credentials or metadata, but no explicit SynthID declaration.'
+                : 'No readable watermark signals in the file\u2019s credentials or metadata.'}
           </p>
           <div className="mt-2.5">
             <div className="flex items-center justify-between text-[10px] uppercase tracking-wider text-slate-500">
-              <span>Pattern strength</span>
-              <span className="font-mono normal-case text-slate-400">{pct}%</span>
+              <span>Signals read</span>
+              <span className="font-mono normal-case text-slate-400">{signals.length}</span>
             </div>
-            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
-              <div
-                className={cn('h-full rounded-full transition-all duration-700', st.bar)}
-                style={{ width: `${Math.max(2, pct)}%` }}
-              />
-            </div>
+            {signals.length > 0 ? (
+              <ul className="mt-1.5 space-y-1">
+                {signals.slice(0, 4).map((sig, i) => (
+                  <li key={i} className="truncate text-[11px] text-slate-400" title={`${sig.label} — ${sig.where}`}>
+                    <span className="text-slate-300">{sig.label}</span>
+                    <span className="text-slate-600"> · {sig.where}</span>
+                  </li>
+                ))}
+                {signals.length > 4 && (
+                  <li className="text-[11px] text-slate-600">+{signals.length - 4} more</li>
+                )}
+              </ul>
+            ) : (
+              <p className="mt-1 text-[11px] text-slate-600">No readable signals in this file.</p>
+            )}
           </div>
         </div>
 
@@ -103,19 +112,13 @@ function WatermarkCheck({ r }: { r: FileResult }) {
             s.removed ? (
               <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-emerald-300">
                 <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                <span>
-                  Pattern broken — no longer detectable
-                  {typeof s.reduced === 'number' && s.reduced > 0 && (
-                    <span className="text-emerald-400/80"> (signal down {s.reduced}%)</span>
-                  )}
-                  .
-                </span>
+                <span>Signal gone — no longer detectable.</span>
               </p>
             ) : (
               <p className="mt-1.5 flex items-start gap-1.5 text-xs leading-relaxed text-amber-300">
                 <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 <span>
-                  Signal weakened{typeof s.reduced === 'number' && s.reduced > 0 && ` (${s.reduced}%)`} but traces may remain — try the Aggressive strength for stubborn watermarks.
+                  The signal survived this pass — try the Aggressive strength for stubborn watermarks.
                 </span>
               </p>
             )
@@ -135,7 +138,8 @@ function WatermarkCheck({ r }: { r: FileResult }) {
       </div>
 
       <p className="mt-3 text-[10px] leading-relaxed text-slate-600">
-        Statistical estimate, computed entirely in your browser — not a Google-supplied verdict.
+        Signals are read directly from the file in your browser. The Google pixel watermark itself
+        needs Google’s key and is not checked here.
       </p>
     </section>
   );
