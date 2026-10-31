@@ -4,7 +4,8 @@
  *  - Lossless structural cleaning (byte surgery, pixels untouched)
  *  - Deep Clean (warp + squeeze + noise + re-encode) to disrupt
  *    invisible watermarks (SynthID-class, spread-spectrum)
- *  - SynthID statistical detection (carrier analysis, see synthid.js)
+ *  - SynthID signal-reading detection (C2PA declarations,
+ *    metadata, tamper evidence — see synthid.js)
  *  - Statistical AI-generation heuristics (noise uniformity,
  *    high-frequency falloff, saturation, color smoothness)
  *  - processFile() orchestrates: scan → detect → score → clean → verify
@@ -500,15 +501,15 @@
       score = stats ? Math.min(65, stats.score + (weak ? 18 : 0)) : (weak ? 30 : 6);
       verdict = score >= 55 ? 'suspicious' : score >= 30 ? 'unclear' : 'clean';
     }
-    /* invisible watermark evidence (pixel-level) */
+    /* invisible watermark evidence (signal reading — deterministic) */
     if (synth && synth.detected) {
       score = Math.max(score, Math.min(97, 84 + Math.round(synth.confidence * 12)));
       verdict = 'ai-evidence';
-      reasons.unshift({ type: 'indicator', text: 'Invisible AI watermark found in the pixels — SynthID-style pattern (' + Math.round(synth.confidence * 100) + '% confidence)' });
+      reasons.unshift({ type: 'indicator', text: 'Invisible AI watermark declared — a readable signal in the file states a SynthID watermark is embedded' });
     } else if (synth && synth.possible) {
       score = Math.max(score, Math.min(74, 52 + Math.round(synth.confidence * 28)));
       if (verdict !== 'ai-evidence') verdict = 'suspicious';
-      reasons.push({ type: 'indicator', text: 'Weak invisible-watermark signal in the pixels (statistical estimate)' });
+      reasons.push({ type: 'indicator', text: 'AI-generation signals found in the file\u2019s credentials or metadata (no explicit watermark declaration)' });
     }
     if (stats && stats.indicators.length) for (const i of stats.indicators) reasons.push({ type: 'indicator', text: i });
     return { score: Math.round(score), verdict: verdict, reasons: reasons };
@@ -579,28 +580,31 @@
     const parsed = await P.scan(view, sizeMB);
     let findings = dedupeFindings(parsed.findings);
 
-    /* 2 — pixel analysis: statistical heuristics + invisible
-     *     watermark (SynthID-class) detection. One decode for both. */
+    /* 2 — signal reading: invisible watermark (SynthID) detection
+     *     on the file bytes (C2PA declarations, metadata, tamper
+     *     evidence), plus statistical heuristics on the pixels. */
     let stats = null, synth = null;
+    if (onStage) { try { onStage('analyze'); } catch (e) {} }
+    if (SY) { try { synth = SY.analyzeFile(view); } catch (e) { synth = null; } }
     if (['jpeg', 'png', 'webp'].includes(format) && typeof createImageBitmap === 'function') {
-      if (onStage) { try { onStage('analyze'); } catch (e) {} }
       try {
         const bmp = await decodeToBitmap(view);
         try { stats = statisticalDetectBmp(bmp); } catch (e) { stats = null; }
-        if (SY) { try { synth = SY.analyzeBitmap(bmp); } catch (e) { synth = null; } }
         try { bmp.close(); } catch (e) {}
       } catch (e) { /* undecodable — skip pixel analysis */ }
     }
 
-    /* 2b — surface the watermark as a finding */
+    /* 2b — surface the watermark signals as a finding */
     if (synth && (synth.detected || synth.possible)) {
       findings.push({
         kind: 'synthid',
-        where: 'Pixel data',
-        label: synth.detected ? 'Invisible AI watermark (SynthID-style)' : 'Possible invisible watermark',
+        where: synth.bestSet === 'c2pa' ? 'C2PA Content Credentials'
+          : synth.bestSet === 'metadata' ? 'Embedded metadata'
+          : synth.bestSet === 'tamper' ? 'File structure' : 'File bytes',
+        label: synth.detected ? 'Invisible AI watermark (SynthID declared)' : 'AI-generation signals (no SynthID declaration)',
         detail: synth.detected
-          ? 'A hidden pattern woven into the pixels — the signature of AI watermarks like Google\u2019s SynthID'
-          : 'A faint pattern in the pixels that may be an invisible watermark',
+          ? 'A readable signal in the file declares an invisible SynthID watermark is embedded'
+          : 'AI-generation markers found in credentials or metadata, but no explicit watermark declaration',
         evidence: synth.detected ? 3 : 2,
         removable: true,
       });
@@ -668,16 +672,15 @@
     });
     const verifiedClean = leftover.length === 0;
 
-    /* 5b — verify the watermark: re-detect on the cleaned output */
+    /* 5b — verify the watermark: re-read the signals on the cleaned output */
     let synthAfter = null, synthReduced = null, synthRemoved = null;
-    if (synth && synth.detected && mode === 'deep' && typeof createImageBitmap === 'function') {
+    if (synth && synth.detected && mode === 'deep' && SY) {
       try {
-        const bmp2 = await decodeToBitmap(outBuffer);
-        synthAfter = SY.analyzeBitmap(bmp2);
-        try { bmp2.close(); } catch (e) {}
+        synthAfter = SY.analyzeFile(outView);
         if (synthAfter) {
-          synthReduced = synth.cvr > 0.01 ? Math.max(0, Math.min(1, 1 - synthAfter.cvr / synth.cvr)) : null;
-          synthRemoved = !synthAfter.detected && (synthAfter.confidence < 0.5 || (synthReduced ?? 0) > 0.5);
+          /* signal reading is binary — there is nothing to estimate */
+          synthReduced = null;
+          synthRemoved = !synthAfter.detected && !synthAfter.possible;
         }
       } catch (e) { synthAfter = null; }
     } else if (synth && synth.detected && mode === 'lossless') {
@@ -698,11 +701,12 @@
       detected: synth.detected,
       possible: synth.possible,
       confidence: synth.confidence,
-      cvr: synth.cvr,
-      peak: synth.peak,
       bestSet: synth.bestSet,
-      topCarriers: synth.topCarriers,
-      after: synthAfter ? { confidence: synthAfter.confidence, cvr: synthAfter.cvr } : null,
+      signals: synth.signals,
+      channels: synth.channels,
+      conclusion: synth.conclusion,
+      notChecked: synth.notChecked,
+      after: synthAfter ? { detected: synthAfter.detected, possible: synthAfter.possible, conclusion: synthAfter.conclusion } : null,
       reduced: synthReduced === null ? null : Math.round(synthReduced * 100),
       removed: synthRemoved,
     } : null;

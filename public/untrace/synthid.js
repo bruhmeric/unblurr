@@ -1,18 +1,39 @@
 /* ============================================================
  * Untrace · synthid.js
- * SynthID-class invisible watermark detection + dissolution.
+ * SynthID watermark detection + dissolution.
  *
- * Based on public reverse-engineering research of Google's
- * SynthID (github.com/aloshdenny/reverse-SynthID):
- *   - empirically verified carrier frequency sets on a 512px
- *     analysis grid (dark-image diagonal grid + bright-image
- *     horizontal axis) and universal 1024px bins
- *   - detection: noise-residual FFT, carrier-vs-background
- *     energy ratio + local peak prominence (codebook-free)
- *   - removal: geometric dissolution — smooth elastic warp
- *     (fragments spatial phase consensus), affine combo
- *     (rotation + zoom + shift), resize squeeze, color nudge,
- *     carrier notch, JPEG re-encode chain
+ * DETECTION — signal-reading method (the approach used by
+ * synthiddetector.com): no statistical estimation, no
+ * percentages. The detector reads the signals a file actually
+ * carries, in four deterministic channels, entirely in the
+ * browser/worker:
+ *   1. c2pa      — Content Credentials (JUMBF manifest store,
+ *                  ISO 19566-5): issuer, claim generator, AI
+ *                  digital-source declarations, signer
+ *                  certificate, SynthID declarations
+ *   2. synthid   — SynthID watermark declarations: Google signs
+ *                  its generated images (Gemini / Imagen) with a
+ *                  credential that declares an invisible SynthID
+ *                  watermark is embedded; OpenAI images carry the
+ *                  same dual signal since May 2026. An explicit
+ *                  "SynthID" mention in credentials or metadata
+ *                  counts too.
+ *   3. metadata  — EXIF / XMP / PNG text chunks: IPTC
+ *                  digitalSourceType codes (e.g.
+ *                  trainedAlgorithmicMedia), generator names
+ *   4. tamper    — structural evidence that provenance data was
+ *                  deliberately removed (emptied credential
+ *                  carriers, header-only EXIF, empty text chunks)
+ *
+ * A signal is present and readable, or it is not — there is
+ * nothing to estimate. The Google pixel watermark itself
+ * (synthid.google) can only be verified by the key holder and is
+ * always reported under notChecked, never guessed.
+ *
+ * REMOVAL — unchanged geometric dissolution: smooth elastic warp
+ * (fragments spatial phase consensus), affine combo (rotation +
+ * zoom + shift), resize squeeze, color nudge, carrier notch,
+ * JPEG re-encode chain.
  *
  * Works in: Web Worker, main thread, Node (pure functions).
  * ============================================================ */
@@ -22,8 +43,8 @@
   const G = typeof self !== 'undefined' ? self : globalThis;
 
   /* ============================================================
-   * CARRIER TABLES (from published reverse-engineering data)
-   * Coordinates are (fy, fx) on an N×N analysis grid, centered.
+   * CARRIER TABLES (from published reverse-engineering data) —
+   * used by the REMOVAL stage (carrier notch) only.
    * ============================================================ */
 
   /* Dark-image carriers — diagonal grid, 512px, extracted from
@@ -75,11 +96,9 @@
     };
   }
 
-  function sigmoid(x) { return 1 / (1 + Math.exp(-x)); }
-  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
-
   /* ============================================================
-   * FFT — iterative radix-2 (power-of-two sizes only)
+   * FFT — iterative radix-2 (power-of-two sizes only).
+   * Used by the removal stage (carrier notch).
    * ============================================================ */
 
   /* In-place 1D FFT. re/im are Float64Array of length n=2^k. */
@@ -143,6 +162,7 @@
 
   /* ============================================================
    * SEPARABLE BOX BLUR (running sum) — ~O(pixels) per pass
+   * (removal stage: elastic warp fields)
    * ============================================================ */
 
   function boxBlur(src, w, h, r) {
@@ -181,206 +201,470 @@
   }
 
   /* ============================================================
-   * DETECTION — codebook-free statistical detector
+   * DETECTION — signal reading (synthiddetector.com method)
    *
-   * Mirrors the published detector's structure (residual FFT,
-   * carrier-vs-random ratio, peak analysis) with two
-   * band-normalized signals that work without reference phases:
-   *   cvr  — carrier energy vs. same-frequency-band background
-   *   prom — per-carrier local peak prominence (ring median)
+   * Four channels, deterministic results. Reads only what the
+   * file actually carries; never estimates, never scores.
    * ============================================================ */
 
-  /**
-   * detectGray512(gray) — analyze a 512×512 grayscale plane
-   * (Float32Array, 0..255). Returns a plain result object.
-   */
-  function detectGray512(gray) {
-    const S = ANALYSIS_SIZE, N = S * S;
-    if (gray.length !== N) return null;
+  /* ---------- byte helpers ---------- */
 
-    /* residual: gray − lowpass(gray) (≈ σ2.2 Gaussian high-pass) */
-    const low = gaussianApprox(gray, S, S, 2.2, 3);
-    const re = new Float64Array(N), im = new Float64Array(N);
-    for (let i = 0; i < N; i++) re[i] = gray[i] - low[i];
-    fft2d(re, im, S, S, false);
+  function be32(v, o) {
+    return ((v[o] << 24) | (v[o + 1] << 16) | (v[o + 2] << 8) | v[o + 3]) >>> 0;
+  }
 
-    const magAt = function (fy, fx) {
-      const i = binIndex(fy, fx, S, S);
-      return Math.sqrt(re[i] * re[i] + im[i] * im[i]);
-    };
-
-    /* carrier lookup sets for ring exclusion */
-    function makeSet(list) {
-      const map = new Set();
-      for (const c of list) map.add(c[0] + ',' + c[1]);
-      return map;
+  function bytesAt(v, o, ascii) {
+    for (let i = 0; i < ascii.length; i++) {
+      if (v[o + i] !== ascii.charCodeAt(i)) return false;
     }
-    const darkSet = makeSet(CARRIERS_DARK);
-    const whiteSet = makeSet(CARRIERS_WHITE);
+    return true;
+  }
 
-    function analyzeCarriers(list, exclude) {
-      let magSum = 0;
-      const pairs = [];
-      for (const c of list) {
-        const m = magAt(c[0], c[1]);
-        magSum += m;
-        /* ring median (r 4..7, Chebyshev), excluding carrier bins */
-        const ring = [];
-        for (let dy = -7; dy <= 7; dy++) {
-          for (let dx = -7; dx <= 7; dx++) {
-            const r = Math.max(Math.abs(dy), Math.abs(dx));
-            if (r < 4 || r > 7) continue;
-            if (exclude.has((c[0] + dy) + ',' + (c[1] + dx))) continue;
-            ring.push(magAt(c[0] + dy, c[1] + dx));
-          }
-        }
-        ring.sort(function (a, b) { return a - b; });
-        const med = ring.length ? ring[ring.length >> 1] : 0;
-        pairs.push({ fy: c[0], fx: c[1], prom: m / (med + 1e-9) });
+  function asciiOf(v, from, to) {
+    let s = '';
+    for (let i = from; i < to; i++) s += String.fromCharCode(v[i]);
+    return s;
+  }
+
+  /* Naive ASCII byte search (needles are short; regions bounded). */
+  function findAscii(v, needle, from, to) {
+    const n = needle.length;
+    const end = Math.min(to === undefined ? v.length : to, v.length) - n;
+    outer:
+    for (let i = from || 0; i <= end; i++) {
+      for (let j = 0; j < n; j++) {
+        if (v[i + j] !== needle.charCodeAt(j)) continue outer;
       }
-      pairs.sort(function (a, b) { return b.prom - a.prom; });
-      /* median of the top 8 prominences: robust against a handful
-       * of image-content harmonics landing near carrier bins */
-      const top = pairs.slice(0, Math.min(8, pairs.length));
-      const meds = top.map(function (p) { return p.prom; }).sort(function (a, b) { return a - b; });
-      const medTop = meds.length ? (meds.length % 2 ? meds[meds.length >> 1] : (meds[meds.length / 2 - 1] + meds[meds.length / 2]) / 2) : 1;
-      /* strict local-peak hits: white-noise bins rarely exceed
-       * 3.5× their ring median by chance */
-      const hitFrac = pairs.filter(function (p) { return p.prom > 3.5; }).length / (pairs.length || 1);
-      return { meanMag: magSum / list.length, medTop: medTop, hitFrac: hitFrac, pairs: pairs };
+      return i;
     }
+    return -1;
+  }
 
-    /* band-matched random background: sample bins whose radius
-     * matches the carrier band (3..30), excluding DC vicinity */
-    const rng = makeRng(0x5eed51d);
-    const randMags = [];
-    let guard = 0;
-    while (randMags.length < 256 && guard++ < 4096) {
-      const fy = Math.floor(rng() * (S - 20)) - (S / 2 - 10);
-      const fx = Math.floor(rng() * (S - 20)) - (S / 2 - 10);
-      const r = Math.sqrt(fy * fy + fx * fx);
-      if (r < 3 || r > 34) continue;
-      if (darkSet.has(fy + ',' + fx) || whiteSet.has(fy + ',' + fx)) continue;
-      randMags.push(magAt(fy, fx));
+  /* Naive binary byte-pattern search (cert OIDs). */
+  function findPattern(v, pat, from) {
+    const n = pat.length;
+    const end = v.length - n;
+    outer:
+    for (let i = from || 0; i <= end; i++) {
+      for (let j = 0; j < n; j++) {
+        if (v[i + j] !== pat[j]) continue outer;
+      }
+      return i;
     }
-    randMags.sort(function (a, b) { return a - b; });
-    const randMean = randMags.reduce(function (a, b) { return a + b; }, 0) / (randMags.length || 1);
+    return -1;
+  }
 
-    /* strongest NON-carrier peak in the band: a genuinely
-     * watermarked image has carriers as its dominant peaks, while
-     * periodic image content produces its own strong peaks */
-    let maxBgProm = 0;
-    {
-      const band = [];
-      for (let fy = -34; fy <= 34; fy++) {
-        for (let fx = -34; fx <= 34; fx++) {
-          const r = Math.sqrt(fy * fy + fx * fx);
-          if (r < 3 || r > 34) continue;
-          if (darkSet.has(fy + ',' + fx) || whiteSet.has(fy + ',' + fx)) continue;
-          band.push([fy, fx, magAt(fy, fx)]);
+  /* Latin-1 (byte-preserving) text of a region, for string/regex
+   * matching. Bounded so pathological files stay cheap. */
+  function latin1Text(v, cap) {
+    const end = Math.min(v.length, cap || 1048576);
+    let s = '';
+    for (let i = 0; i < end; i += 8192) {
+      const n = Math.min(8192, end - i);
+      s += String.fromCharCode.apply(null, v.subarray(i, i + n));
+    }
+    return s;
+  }
+
+  function concatU8(arrays) {
+    let n = 0;
+    for (const a of arrays) n += a.length;
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const a of arrays) { out.set(a, o); o += a.length; }
+    return out;
+  }
+
+  /* ---------- format sniffing ---------- */
+
+  function sniffFormat(view) {
+    if (view.length >= 3 && view[0] === 0xff && view[1] === 0xd8) return 'jpeg';
+    if (view.length >= 8 && view[0] === 0x89 && bytesAt(view, 1, 'PNG')) return 'png';
+    if (view.length >= 12 && bytesAt(view, 0, 'RIFF') && bytesAt(view, 8, 'WEBP')) return 'webp';
+    if (view.length >= 6 && (bytesAt(view, 0, 'GIF87a') || bytesAt(view, 0, 'GIF89a'))) return 'gif';
+    return 'other';
+  }
+
+  /* ---------- C2PA manifest store discovery ----------
+   * A store is a JUMBF superbox: [len(4)] "jumb" [description
+   * box: len(4) "jumd" 16-byte UUID "c2pa…" label…] [payload…].
+   * The description UUID of a C2PA manifest store begins with
+   * the ASCII bytes "c2pa". */
+
+  function scanJumbStores(bytes) {
+    const stores = [];
+    if (!bytes || bytes.length < 40) return stores;
+    let i = 0;
+    while (i + 40 <= bytes.length) {
+      let j = findAscii(bytes, 'jumb', i);
+      const ju = findAscii(bytes, 'JUMB', i);
+      if (j < 0 || (ju >= 0 && ju < j)) j = ju;
+      if (j < 0 || j < 4) break;
+      const boxStart = j - 4;
+      const len = be32(bytes, boxStart);
+      let next = j + 4;
+      if (len >= 40 && len <= bytes.length - boxStart) {
+        if (be32(bytes, j + 4) >= 24 &&
+            (bytesAt(bytes, j + 8, 'jumd') || bytesAt(bytes, j + 8, 'JUMD')) &&
+            (bytesAt(bytes, j + 12, 'c2pa') || bytesAt(bytes, j + 12, 'C2PA'))) {
+          stores.push(bytes.subarray(boxStart, boxStart + len));
+          next = boxStart + len;
         }
       }
-      band.sort(function (a, b) { return b[2] - a[2]; });
-      for (let i = 0; i < Math.min(24, band.length); i++) {
-        const ring = [];
-        for (let dy = -7; dy <= 7; dy++) {
-          for (let dx = -7; dx <= 7; dx++) {
-            const rr = Math.max(Math.abs(dy), Math.abs(dx));
-            if (rr < 4 || rr > 7) continue;
-            const by = band[i][0] + dy, bx = band[i][1] + dx;
-            if (darkSet.has(by + ',' + bx) || whiteSet.has(by + ',' + bx)) continue;
-            ring.push(magAt(by, bx));
-          }
-        }
-        ring.sort(function (a, b) { return a - b; });
-        const med = ring.length ? ring[ring.length >> 1] : 0;
-        const prom = band[i][2] / (med + 1e-9);
-        if (prom > maxBgProm) maxBgProm = prom;
-      }
+      i = next;
     }
+    return stores;
+  }
 
-    /* per-set analysis, best set wins (watermark is content-adaptive) */
-    const darkRes = analyzeCarriers(CARRIERS_DARK, darkSet);
-    const whiteRes = analyzeCarriers(CARRIERS_WHITE, whiteSet);
-    const both = { meanMag: (darkRes.meanMag + whiteRes.meanMag) / 2, medTop: (darkRes.medTop + whiteRes.medTop) / 2, hitFrac: Math.max(darkRes.hitFrac, whiteRes.hitFrac) };
-    const bySet = { dark: darkRes, white: whiteRes };
+  /* Raw fallback: scan the file head for JUMBF c2pa stores
+   * (covers MP4/AVIF-style ContentProvenanceBox payloads and
+   * odd embeddings — the store bytes are validated the same way). */
+  function rawFallbackStores(view) {
+    const cap = Math.min(view.length, 1572864); /* 1.5 MB head */
+    return scanJumbStores(view.subarray(0, cap));
+  }
 
-    const scoreSet = function (r) {
-      const cvr = randMean > 1e-9 ? r.meanMag / randMean : 1;
-      const cvrScore = sigmoid(3.0 * (cvr - 1.45));
-      /* peakiness damping: carrier peaks must dominate the image's
-       * own strongest non-carrier spectral peak */
-      const contrast = r.medTop / Math.max(maxBgProm, 1e-9);
-      const damp = clamp01(contrast / 0.75);
-      const promScore = sigmoid(2.5 * (r.medTop - 2.4)) * damp;
-      const hitScore = sigmoid(8.0 * (r.hitFrac - 0.12)) * damp;
-      return 0.4 * cvrScore + 0.35 * promScore + 0.25 * hitScore;
-    };
+  /* ---------- JPEG ---------- */
 
-    let bestName = 'dark', best = darkRes, bestScore = scoreSet(darkRes);
-    const wScore = scoreSet(whiteRes);
-    if (wScore > bestScore) { bestName = 'white'; best = whiteRes; bestScore = wScore; }
-    const bScore = scoreSet(both);
-    if (bScore > bestScore) { bestName = 'combined'; best = both; bestScore = bScore; }
+  function jpegWalk(view) {
+    const app11 = [], meta = [], tamper = [];
+    let off = 2;
+    const N = view.length;
+    while (off + 4 <= N) {
+      if (view[off] !== 0xff) break;
+      const m = view[off + 1];
+      if (m === 0xd8 || m === 0xd9 || m === 0xda) break;
+      if (m === 0x01 || (m >= 0xd0 && m <= 0xd7)) { off += 2; continue; }
+      const len = (view[off + 2] << 8) | view[off + 3];
+      if (len < 2 || off + 2 + len > N) break;
+      const payload = view.subarray(off + 4, off + 2 + len);
+      if (m === 0xeb) {                       /* APP11 — JUMBF/C2PA carrier */
+        if (payload.length >= 2 && bytesAt(payload, 0, 'JP')) app11.push(payload);
+      } else if (m === 0xe1) {                /* APP1 — EXIF / XMP */
+        if (payload.length >= 6 && bytesAt(payload, 0, 'Exif')) {
+          if (payload.length <= 8) tamper.push('EXIF container present but empty (header only)');
+          else meta.push(payload);
+        } else {
+          meta.push(payload);
+        }
+      } else if (m === 0xed) {                /* APP13 — IPTC/Photoshop */
+        meta.push(payload);
+      } else if (m === 0xfe) {                /* COM — comment */
+        if (payload.length === 0) tamper.push('JPEG comment segment present but empty');
+        else meta.push(payload);
+      }
+      off += 2 + len;
+    }
+    return { app11: app11, meta: meta, tamper: tamper };
+  }
 
-    const cvr = randMean > 1e-9 ? best.meanMag / randMean : 1;
-    const confidence = clamp01(bestScore);
+  /* Reassemble a multi-segment APP11 store: each segment carries
+   * "JP" + box instance + packet sequence (8-byte framing per
+   * ISO 19566-5 D.2); the JUMBF bytes are the rest. */
+  function storesFromApp11(payloads) {
+    const strips = [8, 6, 0];
+    for (let s = 0; s < strips.length; s++) {
+      const parts = [];
+      for (const p of payloads) parts.push(p.subarray(Math.min(strips[s], p.length)));
+      const stores = scanJumbStores(concatU8(parts));
+      if (stores.length) return stores;
+    }
+    return [];
+  }
 
-    /* top carriers for the report */
-    const bestPairs = (bestName === 'combined' ? darkRes : best).pairs;
-    const topCarriers = bestPairs.slice(0, 4).map(function (p) {
-      return { fy: p.fy, fx: p.fx, prom: +p.prom.toFixed(2) };
-    });
+  /* ---------- PNG ---------- */
 
-    return {
-      detected: confidence >= 0.60,
-      possible: confidence >= 0.34 && confidence < 0.60,
-      confidence: +confidence.toFixed(3),
-      cvr: +cvr.toFixed(3),
-      peak: +best.medTop.toFixed(3),
-      hitFrac: +best.hitFrac.toFixed(3),
-      bestSet: bestName,
-      topCarriers: topCarriers,
-    };
+  function pngWalk(view) {
+    const c2paChunks = [], meta = [], tamper = [];
+    const dv = new DataView(view.buffer, view.byteOffset, view.byteLength);
+    let off = 8;
+    const N = view.length;
+    while (off + 8 <= N) {
+      const len = dv.getUint32(off);
+      const type = asciiOf(view, off + 4, off + 8);
+      if (off + 12 + len > N) break;
+      const payload = view.subarray(off + 8, off + 8 + len);
+      if (type === 'caBX' || type === 'c2pa') {
+        c2paChunks.push(payload);
+      } else if (type === 'tEXt' || type === 'iTXt' || type === 'eXIf') {
+        if (len === 0) tamper.push('PNG ' + type + ' chunk present but empty');
+        else meta.push(payload);
+      } else if (type !== 'IDAT' && payload.length > 0 && payload.length <= 1048576) {
+        /* loose JUMBF fragments in a non-carrier chunk: a credential
+         * container that holds no valid manifest store */
+        if (findAscii(payload, 'jumb', 0, payload.length) >= 0 ||
+            findAscii(payload, 'JUMBF', 0, payload.length) >= 0 ||
+            findAscii(payload, 'jumd', 0, payload.length) >= 0) {
+          tamper.push('Credential carrier chunk (' + type.replace(/[^ -~]/g, '') + ') present but no valid manifest store');
+        }
+      }
+      off += 12 + len;
+      if (type === 'IEND') break;
+    }
+    let stores = [];
+    if (c2paChunks.length) {
+      stores = scanJumbStores(concatU8(c2paChunks));
+      if (!stores.length) tamper.push('C2PA carrier chunk present but contains no manifest store');
+    }
+    return { stores: stores, meta: meta, tamper: tamper };
+  }
+
+  /* ---------- WebP ---------- */
+
+  function webpWalk(view) {
+    const meta = [], candidates = [];
+    const dv = new DataView(view.buffer, view.byteOffset, view.byteLength);
+    let off = 12;
+    const N = view.length;
+    while (off + 8 <= N) {
+      const id = asciiOf(view, off, off + 4);
+      const len = dv.getUint32(off + 4, true);
+      if (off + 8 + len > N) break;
+      const payload = view.subarray(off + 8, off + 8 + len);
+      if (id === 'XMP ' || id === 'XMP' || id === 'EXIF') meta.push(payload);
+      if (payload.length >= 12 && payload.length <= 1048576 &&
+          (findAscii(payload, 'jumb', 0, payload.length) >= 0 ||
+           findAscii(payload, 'JUMBF', 0, payload.length) >= 0)) {
+        candidates.push(payload);
+      }
+      off += 8 + len + (len & 1);
+    }
+    let stores = [];
+    for (const c of candidates) stores = stores.concat(scanJumbStores(c));
+    const tamper = (candidates.length && !stores.length)
+      ? ['Credential carrier present but no valid manifest store'] : [];
+    return { stores: stores, meta: meta, tamper: tamper };
+  }
+
+  function extractSignals(view, fmt) {
+    let ex;
+    if (fmt === 'jpeg') {
+      const w = jpegWalk(view);
+      const stores = w.app11.length ? storesFromApp11(w.app11) : [];
+      const tamper = w.tamper.slice();
+      if (w.app11.length && !stores.length) {
+        tamper.push('C2PA carrier (APP11 "JP") present but contains no manifest store');
+      }
+      ex = { stores: stores, meta: w.meta, tamper: tamper };
+    } else if (fmt === 'png') {
+      ex = pngWalk(view);
+    } else if (fmt === 'webp') {
+      ex = webpWalk(view);
+    } else {
+      ex = { stores: [], meta: [], tamper: [] };
+    }
+    if (!ex.stores.length) {
+      const raw = rawFallbackStores(view);
+      if (raw.length) ex.stores = ex.stores.concat(raw);
+    }
+    ex.meta = ex.meta.slice(0, 64); /* bound metadata regions */
+    return ex;
+  }
+
+  /* ---------- channel markers ---------- */
+
+  /* Cert organization names (checked first — X.509 subjects). */
+  const CERT_ORGS = [
+    'Google LLC', 'OpenAI', 'Adobe Inc.', 'Microsoft Corporation',
+    'Anthropic', 'Nikon Corporation', 'Sony Corporation', 'Canon Inc.',
+    'Leica Camera AG', 'Fujifilm Corporation',
+  ];
+
+  /* Vendor families (claim generators, software agents, certs). */
+  const VENDOR_MATCHERS = [
+    { vendor: 'google', re: /\b(google|gemini|imagen|veo|deepmind|nano[ \-]?banana)\b/i },
+    { vendor: 'openai', re: /\b(openai|chatgpt|gpt-image|dall-e|dalle)\b/i },
+    { vendor: 'adobe', re: /\b(adobe|firefly|photoshop|lightroom)\b/i },
+    { vendor: 'microsoft', re: /\b(microsoft|azure)\b/i },
+    { vendor: 'anthropic', re: /\banthropic\b/i },
+  ];
+
+  const CAMERA_RE = /\b(nikon|canon|sony|fujifilm|leica|panasonic|olympus|pentax)\b/i;
+
+  /* IPTC digitalSourceType codes that mean AI involvement. */
+  function aiSourceMarkers(lowerText) {
+    const found = [];
+    if (lowerText.indexOf('compositewithtrainedalgorithmicmedia') >= 0) found.push('compositeWithTrainedAlgorithmicMedia');
+    if (lowerText.indexOf('trainedalgorithmicmedia') >= 0) found.push('trainedAlgorithmicMedia');
+    if (lowerText.indexOf('compositesynthetic') >= 0) found.push('compositeSynthetic');
+    return found;
+  }
+
+  /* Generator names in plain metadata (unsigned, weaker evidence). */
+  const GENERATOR_RE = /\b(firefly|midjourney|stable[ \-]?diffusion|automatic1111|invokeai|comfyui|novelai|dall-e|dalle3|gpt-image|openai|ideogram|leonardo[. \-]ai|recraft|nightcafe|runwayml|flux[. \-]1|black[ \-]?forest[ \-]?labs|grok)\b/i;
+
+  const SYNTHID_RE = /synthid/i;
+
+  function findIssuer(text, lowerText) {
+    for (const org of CERT_ORGS) {
+      if (lowerText.indexOf(org.toLowerCase()) >= 0) return org;
+    }
+    for (const v of VENDOR_MATCHERS) {
+      const m = v.re.exec(text);
+      if (m) return m[1];
+    }
+    const cam = CAMERA_RE.exec(text);
+    if (cam) return cam[1];
+    return null;
+  }
+
+  function vendorOf(issuer) {
+    if (!issuer) return null;
+    const t = issuer.toLowerCase();
+    if (/(google|gemini|imagen|veo|deepmind|nano.?banana)/.test(t)) return 'google';
+    if (/(openai|chatgpt|gpt-image|dall)/.test(t)) return 'openai';
+    if (/(adobe|firefly|photoshop|lightroom)/.test(t)) return 'adobe';
+    if (/(microsoft|azure)/.test(t)) return 'microsoft';
+    if (/anthropic/.test(t)) return 'anthropic';
+    return null;
+  }
+
+  /* X.509 OIDs that mark an embedded signer certificate
+   * (2.5.4.10 organizationName / 2.5.4.3 commonName). */
+  function hasCert(stores) {
+    for (const s of stores) {
+      if (findPattern(s, [0x06, 0x03, 0x55, 0x04, 0x0a]) >= 0) return true;
+      if (findPattern(s, [0x06, 0x03, 0x55, 0x04, 0x03]) >= 0) return true;
+    }
+    return false;
   }
 
   /* ============================================================
-   * BITMAP ANALYSIS (browser path)
+   * analyzeFile(buffer) — main detection entry.
+   * Reads the four channels off the raw file bytes and returns a
+   * deterministic result. Works in Worker / main thread / Node.
    * ============================================================ */
 
-  function makeCanvas(w, h) {
-    if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(w, h);
-    const c = G.document.createElement('canvas');
-    c.width = w; c.height = h;
-    return c;
-  }
-
-  /**
-   * analyzeBitmap(bmp) — draw an ImageBitmap / image source to a
-   * 512×512 canvas and run the detector. Returns null when the
-   * image is too small to analyze meaningfully.
-   */
-  function analyzeBitmap(bmp) {
+  function analyzeFile(buffer) {
     try {
-      if (!bmp || !bmp.width || !bmp.height) return null;
-      if (Math.min(bmp.width, bmp.height) < 256) return null;
-      const S = ANALYSIS_SIZE;
-      const canvas = makeCanvas(S, S);
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(bmp, 0, 0, S, S);
-      const data = ctx.getImageData(0, 0, S, S).data;
-      const gray = new Float32Array(S * S);
-      for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
-        gray[i] = (data[p] + data[p + 1] + data[p + 2]) / 3;
+      const view = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+      if (!view || view.length < 16) return null;
+      const fmt = sniffFormat(view);
+      const ex = extractSignals(view, fmt);
+
+      /* --- channel: c2pa (Content Credentials) --- */
+      let storeText = '', storeLower = '';
+      for (const s of ex.stores) storeText += latin1Text(s) + '\n';
+      storeLower = storeText.toLowerCase();
+      const c2pa = {
+        found: ex.stores.length > 0,
+        issuer: null,
+        signed: false,
+        aiSource: [],
+      };
+      let storeSynthid = false;
+      if (c2pa.found) {
+        c2pa.issuer = findIssuer(storeText, storeLower);
+        c2pa.aiSource = aiSourceMarkers(storeLower);
+        c2pa.signed = hasCert(ex.stores) || /c2pa\.signature/i.test(storeText);
+        storeSynthid = SYNTHID_RE.test(storeText);
       }
-      return detectGray512(gray);
+
+      /* --- channel: metadata (EXIF / XMP / text chunks) --- */
+      let metaText = '';
+      for (const r of ex.meta) metaText += latin1Text(r) + '\n';
+      const metaLower = metaText.toLowerCase();
+      const metaMarkers = [];
+      for (const m of aiSourceMarkers(metaLower)) metaMarkers.push('digitalSourceType: ' + m);
+      const metaSynthid = SYNTHID_RE.test(metaText);
+      if (metaSynthid) metaMarkers.push('SynthID mentioned');
+      const gen = GENERATOR_RE.exec(metaText);
+      if (gen) metaMarkers.push('generator named (' + gen[1] + ')');
+      const metadata = { found: metaMarkers.length > 0, markers: metaMarkers };
+
+      /* --- channel: synthid (watermark declarations) ---
+       * Google signs its generated images with a credential that
+       * declares an embedded SynthID watermark; OpenAI carries the
+       * same dual signal since May 2026. Read the declaration. */
+      const issuerVendor = vendorOf(c2pa.issuer);
+      const synthid = { found: false, scope: null };
+      if (storeSynthid) {
+        synthid.found = true;
+        synthid.scope = issuerVendor || 'credentials';
+      } else if (metaSynthid) {
+        synthid.found = true;
+        synthid.scope = 'metadata';
+      } else if (c2pa.found && (issuerVendor === 'google' || issuerVendor === 'openai') &&
+                 c2pa.aiSource.indexOf('trainedAlgorithmicMedia') >= 0) {
+        synthid.found = true;
+        synthid.scope = issuerVendor;
+      }
+
+      /* --- channel: tamper (structural removal evidence) --- */
+      const tamper = { found: ex.tamper.length > 0, signs: ex.tamper };
+
+      /* --- deterministic verdict --- */
+      const detected = synthid.found;
+      const possible = !detected &&
+        ((c2pa.found && c2pa.aiSource.length > 0) || metadata.found || tamper.found);
+      const confidence = detected ? 1 : possible ? 0.5 : 0;
+
+      let bestSet = 'none';
+      if (detected) bestSet = storeSynthid ? 'c2pa' : (metaSynthid ? 'metadata' : 'c2pa');
+      else if (possible) bestSet = (c2pa.found && c2pa.aiSource.length) ? 'c2pa'
+        : metadata.found ? 'metadata' : 'tamper';
+
+      /* --- signals read (what the file actually says) --- */
+      const signals = [];
+      if (storeSynthid) {
+        signals.push({
+          label: 'SynthID watermark declaration',
+          where: 'C2PA Content Credentials' + (c2pa.issuer ? ' (' + c2pa.issuer + ')' : ''),
+        });
+      }
+      if (metaSynthid) {
+        signals.push({ label: 'SynthID mentioned', where: 'embedded metadata' });
+      }
+      if (detected && !storeSynthid && !metaSynthid) {
+        signals.push({
+          label: (synthid.scope === 'openai' ? 'OpenAI' : 'Google') +
+            ' credential declares AI-generated media — SynthID watermark declared',
+          where: 'C2PA Content Credentials',
+        });
+      }
+      if (c2pa.found && c2pa.aiSource.length) {
+        signals.push({
+          label: 'AI-generated media declared (' + c2pa.aiSource.join(', ') + ')',
+          where: 'C2PA Content Credentials' + (c2pa.issuer ? ' · ' + c2pa.issuer : ''),
+        });
+      } else if (c2pa.found) {
+        signals.push({
+          label: 'Content Credentials present' + (c2pa.issuer ? ' (' + c2pa.issuer + ')' : '') +
+            (c2pa.signed ? ', signed' : ''),
+          where: 'C2PA',
+        });
+      }
+      for (const m of metadata.markers) {
+        signals.push({ label: m.charAt(0).toUpperCase() + m.slice(1), where: 'embedded metadata' });
+      }
+      for (const s of tamper.signs) {
+        signals.push({ label: 'Provenance appears removed: ' + s, where: 'file structure' });
+      }
+
+      const conclusion = (detected || possible || signals.length) ? 'signals_found' : 'nothing_found';
+
+      return {
+        detected: detected,
+        possible: possible,
+        confidence: confidence,
+        bestSet: bestSet,
+        signals: signals,
+        channels: {
+          c2pa: c2pa,
+          synthid: synthid,
+          metadata: metadata,
+          tamper: tamper,
+        },
+        conclusion: conclusion,
+        notChecked: ['synthid.google'],
+      };
     } catch (e) {
       return null;
     }
   }
 
   /* ============================================================
-   * DISSOLUTION — geometric watermark disruptors
+   * DISSOLUTION — REMOVAL (unchanged)
    *
    * Round-06-style stack (minus the VAE stage, which needs a
    * neural net): elastic warp + affine combo in ONE resampling
@@ -609,6 +893,9 @@
   /* ============================================================ */
 
   const api = {
+    /* detection — signal reading (synthiddetector.com method) */
+    analyzeFile: analyzeFile,
+    /* removal / dissolution (unchanged) */
     CARRIERS_DARK: CARRIERS_DARK,
     CARRIERS_WHITE: CARRIERS_WHITE,
     UNIVERSAL_1024: UNIVERSAL_1024,
@@ -617,8 +904,6 @@
     fft1d: fft1d,
     fft2d: fft2d,
     binIndex: binIndex,
-    detectGray512: detectGray512,
-    analyzeBitmap: analyzeBitmap,
     dissolvePixels: dissolvePixels,
     colorNudge: colorNudge,
     notchCarriers: notchCarriers,
