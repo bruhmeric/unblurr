@@ -16,6 +16,8 @@ there is no backend at all.
 | **GPS coordinates** | ✅ | ✅ |
 | **XMP / IPTC** — creator tools, digital source declarations, edit history | ✅ | ✅ |
 | **JPEG comments, PNG text chunks, WebP EXIF/XMP, GIF comments** | ✅ | ✅ |
+| **TIFF IFD metadata** — EXIF/GPS/IPTC/XMP tags, camera & timestamp fields, embedded thumbnails (pixels byte-identical) | ✅ | ✅ |
+| **HEIC / HEIF / AVIF item metadata** — Exif items, XMP "mime" items, C2PA/uuid items (pixel data byte-identical) | ✅ | ✅ |
 | **Trailing payloads** appended after JPEG EOI | ✅ | ✅ |
 | **Filename hints** (`DALL_E_1024.png`, `ComfyUI_00045.png`) | ✅ | ✅ (randomized names) |
 | **Invisible watermarks** (SynthID) | ✅ signal reading: C2PA watermark declarations, metadata markers, tamper evidence (synthiddetector.com method — deterministic, no estimation) | ⚡ dissolved via Deep Clean + re-checked after cleaning |
@@ -29,10 +31,19 @@ spot (`synthid.google`), never guessed.
 
 ## Cleaning modes (as shown in the UI)
 
-- **Standard Clean** (internally lossless) — byte-level container surgery.
-  Removes every metadata segment/chunk while keeping the pixel data
-  bit-identical (verified by test: PNG IDAT and JPEG scan data are untouched).
-  The UI labels this “Image quality: identical to original”.
+- **Standard Clean** (internally lossless) — byte-level container surgery, the
+  method used by [deletefootprints.ai](https://deletefootprints.ai/): metadata
+  is stripped directly from the file headers and the file is rebuilt without
+  it. **We never recompress, resize, or alter pixels — the pixel data stays
+  byte-for-byte the same and the file only gets smaller by the metadata it
+  carried.** Covers JPEG (all APPn/COM segments, C2PA/JUMBF in APP11, trailing
+  data), PNG (text/eXIf/caBX chunks), WebP (EXIF/XMP/ICCP + VP8X flag
+  rewrite), GIF (comments/extensions), TIFF (IFD rebuild: every non-structural
+  tag dropped, strips/tiles copied verbatim) and HEIC/HEIF/AVIF (iinf/iloc
+  item rebuild: Exif, XMP "mime" and C2PA items removed, mdat re-pointed).
+  The UI labels this “Image quality: identical to original”. If a container
+  cannot be rebuilt safely, the file falls back to a re-encode instead of
+  risking corruption.
 - **Deep Clean** — decodes the image and runs a SynthID-aware dissolution
   pipeline ported from public reverse-engineering research
   ([reverse-SynthID](https://github.com/aloshdenny/reverse-SynthID)):
@@ -65,7 +76,8 @@ spot (`synthid.google`), never guessed.
   - `signatures.js` — AI signature database (40+ generators, SD parameter
     patterns, C2PA markers, filename heuristics)
   - `parsers.js` — structure-aware parsers for JPEG segments, PNG chunks,
-    WebP RIFF boxes, GIF blocks + EXIF (TIFF IFD) and XMP readers
+    WebP RIFF boxes, GIF blocks, TIFF IFDs, ISO-BMFF (HEIC/AVIF) boxes + EXIF
+    (TIFF IFD) and XMP readers
   - `synthid.js` — SynthID watermark detector (signal reading, per the
     synthiddetector.com method) + dissolver: reads C2PA Content
     Credentials manifest stores (JPEG APP11 "JP" / PNG caBX / WebP
@@ -77,8 +89,9 @@ spot (`synthid.google`), never guessed.
     deterministic channels, no statistical estimation. Removal side:
     elastic/affine warp, carrier notch (pure-JS radix-2 FFT,
     empirically-verified carrier tables)
-  - `engine.js` — lossless cleaners, SynthID-aware deep clean, statistical AI
-    detector, scoring, before/after watermark verification
+  - `engine.js` — lossless cleaners for JPEG/PNG/WebP/GIF/TIFF/HEIC-AVIF
+    (deletefootprints.ai header-surgery method), SynthID-aware deep clean,
+    statistical AI detector, scoring, before/after watermark verification
   - `worker.js` — worker entry point
 - **JSZip** (lazy-loaded) for one-click batch ZIP downloads
 - **Zustand** for queue/settings state
@@ -131,19 +144,21 @@ pixel identity, and the SynthID pipeline on synthetic images:
 
 ```bash
 python3 scripts/make_test_images.py     # metadata fixture images
-npm run test:engine                     # 35 assertions (scan/clean/verify)
+npm run test:engine                     # 61 assertions (scan/clean/verify)
 node scripts/test-synthid.mjs           # 54 assertions (detect, dissolve, notch)
 ```
 
 Covers: Midjourney-in-EXIF JPEG (+ GPS + trailing payload), Firefly XMP with
 `trainedAlgorithmicMedia`, SD/ComfyUI PNG text chunks, C2PA/JUMBF PNG,
-DALL·E eXIf, Grok WebP EXIF, SD GIF comments, clean-file zero-finding
-behavior, lossless pixel identity (PNG + JPEG), filename heuristics; plus
-C2PA declaration parsing (JPEG APP11 single & multi-segment, PNG caBX,
-WebP), SynthID declarations for Google / OpenAI / explicit mentions,
-metadata-channel markers, tamper evidence, after-clean verification,
-FFT-vs-DFT correctness, Hermitian symmetry, warp PSNR floors, and
-carrier-notch energy damping.
+DALL·E eXIf, Grok WebP EXIF, SD GIF comments, **AI TIFF (EXIF + GPS + IPTC +
+XMP tags; strips byte-identical after rebuild, validated with PIL)**, **AI
+HEIC (Exif + XMP mime items + cdsc reference; coded payload byte-identical
+after iinf/iloc/mdat rebuild)**, clean-file zero-finding behavior, lossless
+pixel identity (PNG + JPEG + TIFF), filename heuristics; plus C2PA declaration
+parsing (JPEG APP11 single & multi-segment, PNG caBX, WebP), SynthID
+declarations for Google / OpenAI / explicit mentions, metadata-channel
+markers, tamper evidence, after-clean verification, FFT-vs-DFT correctness,
+Hermitian symmetry, warp PSNR floors, and carrier-notch energy damping.
 
 ## Honesty & limitations
 
@@ -166,7 +181,11 @@ carrier-notch energy damping.
 - Platforms may still classify images **visually** — metadata cleaning does
   not change what pixels look like to a classifier.
 - GIFs keep their animation in Standard Clean; Deep Clean converts them to
-  stills. AVIF/HEIC/BMP/TIFF are re-encoded where the browser can decode them.
+  stills. **TIFF, HEIC/HEIF and AVIF get the same lossless header surgery as
+  JPEG/PNG/WebP** (no re-encode, pixels untouched); BMP, ICO and files whose
+  structure cannot be rebuilt safely are re-encoded where the browser can
+  decode them. DNG-style raw TIFFs are refused by the lossless path and fall
+  back to Deep Clean.
 
 ## Use responsibly
 

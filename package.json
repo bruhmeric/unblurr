@@ -7,6 +7,8 @@
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "eslint .",
+    "test:engine": "node scripts/test-engine.mjs",
+    "test:synthid": "node scripts/test-synthid.mjs",
     "db:push": "echo 'MongoDB mode: set MONGODB_URI (Atlas connection string) — no schema push required'"
   },
   "dependencies": {
